@@ -45,7 +45,7 @@ def main() -> int:
     cfg = MultiConfig.load()
     inst = cfg.resolve(instance_name)
 
-    domain = inst.url.replace("https://", "").replace("http://", "").rstrip("/")
+    domain = inst.hostname
 
     # If no test paths were provided, use defaults.
     has_test_path = any(a.endswith(".py") or os.path.isdir(a) for a in pytest_args)
