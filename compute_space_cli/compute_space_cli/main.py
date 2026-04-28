@@ -403,6 +403,14 @@ class InstanceCmd:
         multi.evolve(default_instance=name).save()
         print(f"Default instance set to '{name}'")
 
+    @cappa.command(name="token")
+    def token(
+        self,
+        cfg: Annotated[config.Instance, Dep(resolve_instance)],
+    ) -> None:
+        """Print the stored API token for an instance."""
+        print(cfg.token)
+
 
 @cappa.command(name="curl", help="curl with your OpenHost bearer token injected.")
 @attrs.define
