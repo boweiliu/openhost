@@ -47,6 +47,7 @@ from compute_space.core.domains import set_primary_domain
 from compute_space.core.domains import set_record_status
 from compute_space.core.domains import upsert_record
 from compute_space.core.logging import logger
+from compute_space.core.mdns.responder import MdnsResponder
 from compute_space.core.operation_locks import detach_operation
 from compute_space.core.operation_locks import start_exclusive_operation
 from compute_space.core.system_agent.client import SystemAgentError
@@ -183,6 +184,7 @@ async def add_domain(
     config: NamedDependency[Config],
     db: NamedDependency[sqlite3.Connection],
     dns_provider: NamedDependency[InternalDnsProvider],
+    mdns_responder: NamedDependency[MdnsResponder],
 ) -> Response[DomainListResponse]:
     name = data.name.strip().lower()
     domain = Domain(name=name, tls=data.tls)
@@ -200,7 +202,9 @@ async def add_domain(
             cert_status=DomainCertStatus.ACQUIRING if domain.tls else DomainCertStatus.ACTIVE,
         ),
     )
-    if not domain.mdns:
+    if domain.mdns:
+        await mdns_responder.update(effective_domains(db))
+    else:
         try:
             await dns_provider.add_zone(name)
         except DnsNotEnabled:
@@ -310,6 +314,7 @@ async def remove_domain(
     config: NamedDependency[Config],
     db: NamedDependency[sqlite3.Connection],
     dns_provider: NamedDependency[InternalDnsProvider],
+    mdns_responder: NamedDependency[MdnsResponder],
 ) -> Response[DomainListResponse]:
     name = name.strip().lower()
     removed = get_record(db, name)
@@ -320,7 +325,9 @@ async def remove_domain(
         if current is not None and current.is_primary:
             raise ValidationException(detail="cannot remove the primary domain")
         raise NotFoundException(detail="domain not found")
-    if removed is not None and not removed.to_domain().mdns:
+    if removed.to_domain().mdns:
+        await mdns_responder.update(effective_domains(db))
+    else:
         await dns_provider.remove_zone(name)
     # Regenerate Caddy only after this response has been sent — see _reload_caddy_after_response.
     return Response(
