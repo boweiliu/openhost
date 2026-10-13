@@ -82,7 +82,10 @@ def _current_tag(project: str) -> str | None:
 
 def _latest_ancestor_tag(project: str) -> str | None:
     """The highest release tag in HEAD's history (HEAD included). Not ``git describe``, which returns only the
-    nearest tag of any name, so a non-release tag nearer to HEAD would hide every release behind it."""
+    nearest tag of any name, so a non-release tag nearer to HEAD would hide every release behind it.
+
+    Kept in sync with update._latest_ancestor_tag.
+    """
     result = _git(project, "tag", "--merged", "HEAD")
     if result.returncode != 0:
         return None

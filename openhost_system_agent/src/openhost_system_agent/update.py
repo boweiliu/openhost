@@ -109,6 +109,8 @@ def _latest_ancestor_tag(repo: git.Repo) -> str | None:
 
     Not ``git describe``: it returns only the nearest tag of any name, so a non-release tag (e.g. v1.3.0-rc1) nearer
     to HEAD would hide every release behind it, and the walk would restart from the oldest tag.
+
+    Kept in sync with apply_after_checkout._latest_ancestor_tag.
     """
     merged: str = repo.git.tag("--merged", "HEAD")
     tags = sorted((t for t in merged.split() if _RELEASE_TAG.fullmatch(t)), key=_version_key)
