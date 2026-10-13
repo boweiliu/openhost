@@ -70,8 +70,7 @@ _DOMAIN_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})+$")
 @attr.s(auto_attribs=True, frozen=True)
 class AddDomainRequest:
     name: str
-    # Defaults by name: http for a `.local` domain, which can't get a public cert, https otherwise.
-    tls: bool | None = None
+    tls: bool
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -186,8 +185,7 @@ async def add_domain(
     dns_provider: NamedDependency[InternalDnsProvider],
 ) -> Response[DomainListResponse]:
     name = data.name.strip().lower()
-    default_tls = not Domain(name).mdns
-    domain = Domain(name=name, tls=default_tls if data.tls is None else data.tls)
+    domain = Domain(name=name, tls=data.tls)
     error = _validate_new_domain(config, domain, db)
     if error is not None:
         raise ValidationException(detail=error)

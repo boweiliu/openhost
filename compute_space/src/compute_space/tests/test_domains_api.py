@@ -202,7 +202,7 @@ def test_primary_with_expired_cert_not_active(cfg: Any, client: TestClient[Lites
 
 def test_add_local_domain_is_active_and_routable(cfg: Any, client: TestClient[Litestar]) -> None:
     client.cookies.update(_auth_cookie(cfg.db_path))
-    resp = client.post("/api/domains", json={"name": "myhost.local"})
+    resp = client.post("/api/domains", json={"name": "myhost.local", "tls": False})
     assert resp.status_code == 202
     # POST returns the full updated list (so the UI repaints without a follow-up GET).
     body = resp.json()
@@ -265,7 +265,7 @@ def test_an_mdns_domain_never_reaches_the_dns_provider(
     # .local is served by the wildcard mDNS responder; CoreDNS never sees it.
     dns_provider, client = dns_client
 
-    client.post("/api/domains", json={"name": "myhost.local"})
+    client.post("/api/domains", json={"name": "myhost.local", "tls": False})
     client.delete("/api/domains/myhost.local")
 
     assert list(dns_provider.zones) == [PRIMARY.name]
@@ -284,10 +284,15 @@ def test_add_duplicate_rejected(cfg: Any, client: TestClient[Litestar]) -> None:
 
 def test_add_invalid_name_rejected(cfg: Any, client: TestClient[Litestar]) -> None:
     client.cookies.update(_auth_cookie(cfg.db_path))
-    resp = client.post("/api/domains", json={"name": "not a domain"})
+    resp = client.post("/api/domains", json={"name": "not a domain", "tls": False})
     assert resp.status_code == 400
     assert resp.json()["detail"] == "invalid domain name"
-    assert client.post("/api/domains", json={"name": "nodot"}).status_code == 400
+    assert client.post("/api/domains", json={"name": "nodot", "tls": False}).status_code == 400
+
+
+def test_add_without_tls_rejected(cfg: Any, client: TestClient[Litestar]) -> None:
+    client.cookies.update(_auth_cookie(cfg.db_path))
+    assert client.post("/api/domains", json={"name": "myhost.local"}).status_code == 400
 
 
 def test_add_mdns_with_tls_rejected(cfg: Any, client: TestClient[Litestar]) -> None:
@@ -302,7 +307,7 @@ def test_add_mdns_with_tls_rejected(cfg: Any, client: TestClient[Litestar]) -> N
 
 def test_remove_runtime_domain(cfg: Any, client: TestClient[Litestar]) -> None:
     client.cookies.update(_auth_cookie(cfg.db_path))
-    client.post("/api/domains", json={"name": "myhost.local"})
+    client.post("/api/domains", json={"name": "myhost.local", "tls": False})
     assert client.delete("/api/domains/myhost.local").status_code == 200
     names = {d["name"] for d in client.get("/api/domains").json()["domains"]}
     assert names == {"host.example.com"}
