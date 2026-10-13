@@ -69,6 +69,7 @@ class _EchoBackend(BaseHTTPRequestHandler):
         self.send_response(418 if self.path == "/backend-error" else 200)
         self.send_header("X-Backend-Saw-Proto", self.headers.get("X-Forwarded-Proto", ""))
         self.send_header("X-Backend-Saw-Host", self.headers.get("X-Forwarded-Host", ""))
+        self.send_header("X-Backend-Saw-Router-URL", self.headers.get("X-OpenHost-Router-URL", ""))
         self.send_header("Content-Length", str(len(response_body)))
         self.end_headers()
         if self.command != "HEAD":
@@ -166,6 +167,7 @@ async def test_app_reachable_over_https_on_tls_domain(wrapped_app: Any) -> None:
     assert r.text == "backend-ok"
     assert r.headers["X-Backend-Saw-Proto"] == "https"
     assert r.headers["X-Backend-Saw-Host"] == "myapp.host.example.com"
+    assert r.headers["X-Backend-Saw-Router-URL"] == "https://host.example.com"
 
 
 @pytest.mark.asyncio
@@ -177,6 +179,17 @@ async def test_same_app_reachable_over_http_on_local_domain(wrapped_app: Any) ->
     # the crux: same app, arriving on `.local`, is proxied as plain http
     assert r.headers["X-Backend-Saw-Proto"] == "http"
     assert r.headers["X-Backend-Saw-Host"] == "myapp.myhost.local"
+    # The router on the domain the visitor used, not the primary.
+    assert r.headers["X-Backend-Saw-Router-URL"] == "http://myhost.local"
+
+
+@pytest.mark.asyncio
+async def test_router_url_header_is_the_routers_not_the_clients(wrapped_app: Any) -> None:
+    async with _client(wrapped_app) as c:
+        r = await c.get(
+            "http://myapp.myhost.local:8080/", headers={"X-OpenHost-Router-URL": "https://evil.example.org"}
+        )
+    assert r.headers["X-Backend-Saw-Router-URL"] == "http://myhost.local:8080"
 
 
 @pytest.mark.asyncio
