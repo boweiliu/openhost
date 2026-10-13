@@ -105,11 +105,14 @@ def _current_tag(repo: git.Repo) -> str | None:
 
 
 def _latest_ancestor_tag(repo: git.Repo) -> str | None:
-    try:
-        result: str = repo.git.describe("--tags", "--abbrev=0", "HEAD")
-    except git.GitCommandError:
-        return None
-    return result if _RELEASE_TAG.fullmatch(result) else None
+    """The highest release tag in HEAD's history (HEAD included).
+
+    Not ``git describe``: it returns only the nearest tag of any name, so a non-release tag (e.g. v1.3.0-rc1) nearer
+    to HEAD would hide every release behind it, and the walk would restart from the oldest tag.
+    """
+    merged: str = repo.git.tag("--merged", "HEAD")
+    tags = sorted((t for t in merged.split() if _RELEASE_TAG.fullmatch(t)), key=_version_key)
+    return tags[-1] if tags else None
 
 
 # ── Target ref (pin to a branch/commit instead of the latest tag) ────

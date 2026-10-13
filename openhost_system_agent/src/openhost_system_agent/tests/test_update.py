@@ -126,6 +126,33 @@ def test_current_and_ancestor_tag(tmp_path: Path) -> None:
     assert update_mod._latest_ancestor_tag(repo) == "v1.1.0"
 
 
+def test_ancestor_tag_skips_nearer_non_release_tag(tmp_path: Path) -> None:
+    # REGRESSION: git describe returned the nearer rc tag, which was then rejected, so the base was None and the walk
+    # restarted from the oldest tag (v0.1.0, which has no apply_after_checkout.py, stranding the host there).
+    repo_dir = _make_repo(tmp_path / "repo", ["v0.1.0", "v0.2.0"])
+    _commit(repo_dir, "rc")
+    _git(repo_dir, "tag", "v0.3.0-rc1")
+    _commit(repo_dir, "past the rc")
+    repo = git.Repo(repo_dir)
+
+    assert update_mod._latest_ancestor_tag(repo) == "v0.2.0"
+    assert update_mod._next_step(repo) is None
+
+
+def test_ancestor_tag_is_highest_release_not_nearest(tmp_path: Path) -> None:
+    # A merge can bring in a higher release than the nearest tag by distance.
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0"])
+    _git(repo_dir, "checkout", "-b", "release")
+    _commit_and_tag(repo_dir, "v1.1.0")
+    _git(repo_dir, "checkout", "main")
+    for i in range(3):
+        _commit(repo_dir, f"main {i}")
+    _git(repo_dir, "tag", "v1.0.1-hotfix")
+    _git(repo_dir, "merge", "--no-ff", "-X", "ours", "-m", "merge release", "release")
+
+    assert update_mod._latest_ancestor_tag(git.Repo(repo_dir)) == "v1.1.0"
+
+
 # ── fetch_updates ────────────────────────────────────────────────────
 
 
