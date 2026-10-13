@@ -30,8 +30,14 @@
       - fuse3
     state: present
 
-# LAN mode: avahi publishes the machine's own <hostname>.local (so `ssh host@<hostname>.local`
-# works); the router's own responder adds the `.local` domain's app subdomains on top.
+# LAN mode: the router's own mDNS responder publishes the `.local` domain and its app subdomains, so
+# avahi isn't needed for the apps.  It's installed so the box stays findable without openhost:
+# avahi publishes the machine's own <hostname>.local independently of the router, so
+# `ssh host@<hostname>.local` still works if openhost is down, crashed, or mid-upgrade (on a
+# headless Pi that's the only easy way back in), and it works even when the hostname differs from
+# the domain.  When avahi is running and owns the bare <hostname>.local, the router leaves that one
+# name to it and answers only the subdomains (two responders answering one unique name with
+# different data would make avahi rename the host).
 - name: Install avahi (LAN mode)
   apt:
     name: avahi-daemon
