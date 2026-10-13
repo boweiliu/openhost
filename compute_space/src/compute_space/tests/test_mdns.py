@@ -117,11 +117,17 @@ async def test_responder_answers_over_the_wire() -> None:
     assert responder._sock is not None
     port = responder._sock.getsockname()[1]
     loop = asyncio.get_running_loop()
+    query = _query_packet(("myapp.myhost.local", TYPE_A), query_id=42)
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
         client.setblocking(False)
-        client.connect(("127.0.0.1", port))
-        await loop.sock_sendall(client, _query_packet(("myapp.myhost.local", TYPE_A), query_id=42))
+        # Sent to the group over loopback, like a (legacy, so unicast-answered) querier on the LAN.
+        client.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
+        await loop.sock_sendto(client, query, ("224.0.0.251", port))
         reply = await asyncio.wait_for(loop.sock_recv(client, 9000), timeout=5)
+        # The socket is bound to the group, so unicast straight to it is never seen.
+        await loop.sock_sendto(client, query, ("127.0.0.1", port))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(loop.sock_recv(client, 9000), timeout=0.5)
     a = _records(reply)[0]
     # answered with the address the query arrived on
     assert socket.inet_ntoa(a[4]) == "127.0.0.1"

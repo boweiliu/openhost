@@ -60,7 +60,10 @@ class MdnsResponder:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_PKTINFO, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)  # RFC 6762 section 11
-        sock.bind(("", self._port))
+        # Bound to the group, not to every address: the kernel then delivers only datagrams sent to
+        # the mDNS group (from the link, since multicast to 224.0.0.0/24 isn't routed), never unicast
+        # from elsewhere.  Replies still get a real source address, from the interface they leave on.
+        sock.bind((_MDNS_GROUP, self._port))
         sock.setblocking(False)
         self._sock = sock
         asyncio.get_running_loop().add_reader(sock.fileno(), self._on_readable)
@@ -73,7 +76,7 @@ class MdnsResponder:
             try:
                 await self._rejoin_task
             except asyncio.CancelledError:
-                pass
+                pass  # the cancellation we just asked for
             self._rejoin_task = None
         if self._sock is not None:
             asyncio.get_running_loop().remove_reader(self._sock.fileno())
