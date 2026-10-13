@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import errno
-import os
 import socket
 import struct
 
@@ -21,19 +20,12 @@ _MREQN = struct.Struct("@4s4si")
 # How often to look for new interfaces to join the group on (a USB NIC plugged in after boot, etc).
 _REJOIN_SECONDS = 30
 _MAX_PACKET = 9000
-_AVAHI_PID_FILE = "/run/avahi-daemon/pid"
-
-
-def _avahi_name() -> str | None:
-    """The name avahi publishes for this machine, if avahi is running."""
-    if not os.path.exists(_AVAHI_PID_FILE):
-        return None
-    return socket.gethostname().split(".")[0].lower() + ".local"
 
 
 class MdnsResponder:
-    """Answers mDNS queries for the instance's ``.local`` domains and every name under them, so
-    ``myapp.myhost.local`` resolves on the LAN without any per-app registration.
+    """Answers mDNS queries for every name under the instance's ``.local`` domains, so
+    ``myapp.myhost.local`` resolves on the LAN without any per-app registration.  The bare domain is
+    the machine's own ``<hostname>.local``, which avahi publishes; this only adds the subdomains.
 
     Each query is answered with the address of the interface it arrived on, so the answer tracks DHCP
     renewals and interface changes without any polling.  The socket shares port 5353 with avahi (or any
@@ -60,7 +52,7 @@ class MdnsResponder:
         elif not self._domains and self._sock is not None:
             await self.stop()
         if self._domains:
-            logger.info(f"mDNS: publishing {', '.join(self._domains)} and every name under them")
+            logger.info(f"mDNS: publishing every name under {', '.join(self._domains)}")
 
     def _start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -138,7 +130,7 @@ class MdnsResponder:
             return
         if query is None:
             return
-        reply = build_answer(query, addr[1], self._domains, _avahi_name(), local_ip)
+        reply = build_answer(query, addr[1], self._domains, local_ip)
         if reply is None:
             return
         # Legacy (non-5353) queriers get a unicast reply; everyone else a multicast one, so other

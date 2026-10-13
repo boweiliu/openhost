@@ -30,19 +30,34 @@
       - fuse3
     state: present
 
-# LAN mode: the router's own mDNS responder publishes the `.local` domain and its app subdomains, so
-# avahi isn't needed for the apps.  It's installed so the box stays findable without openhost:
-# avahi publishes the machine's own <hostname>.local independently of the router, so
-# `ssh host@<hostname>.local` still works if openhost is down, crashed, or mid-upgrade (on a
-# headless Pi that's the only easy way back in), and it works even when the hostname differs from
-# the domain.  When avahi is running and owns the bare <hostname>.local, the router leaves that one
-# name to it and answers only the subdomains (two responders answering one unique name with
-# different data would make avahi rename the host).
-- name: Install avahi (LAN mode)
-  apt:
-    name: avahi-daemon
-    state: present
-  when: mdns_mode | bool
+# LAN mode (a `.local` domain) splits the names in two: avahi publishes the bare domain, which is
+# the machine's own <hostname>.local, and the router's responder publishes every app subdomain under
+# it.  So the hostname must be the domain's label (`bottle` for bottle.local).  Leaving the bare name
+# to avahi also keeps the box findable (`ssh host@bottle.local`) when openhost is down or mid-upgrade.
+- name: LAN mode hostname and avahi
+  when: (domain | default('')).split(':')[0].lower().endswith('.local')
+  vars:
+    lan_hostname: "{{ domain.split(':')[0].split('.')[0] | lower }}"
+  block:
+    - name: Check the LAN mode domain is a single label under .local
+      assert:
+        that: domain.split(':')[0].split('.') | length == 2
+        fail_msg: "LAN mode needs a domain like bottle.local (the machine's hostname plus .local), got {{ domain }}"
+
+    - name: Set the hostname to the LAN mode domain's label
+      hostname:
+        name: "{{ lan_hostname }}"
+
+    - name: Resolve the new hostname locally
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1\s'
+        line: "127.0.1.1 {{ lan_hostname }}"
+
+    - name: Install avahi
+      apt:
+        name: avahi-daemon
+        state: present
 
 # JuiceFS mounts the archive tier with -o allow_other so apps
 # running under rootless-podman's subuid namespace can traverse
