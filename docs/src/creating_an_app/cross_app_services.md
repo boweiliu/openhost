@@ -78,20 +78,40 @@ Each entry in `grants` is either an opaque string (e.g. `"read"`) or a TOML/JSON
 ### Calling a service
 
 ```
-GET|POST|WS|... [BOTTLE_ROUTER_URL]/api/services/v2/call/<shortname>/<rest>
+GET|POST|WS|... <router>/api/services/v2/call/<shortname>/<rest>
 ```
-along with `Authorization: Bearer $BOTTLE_APP_TOKEN` header for server-side requests.
-`BOTTLE_ROUTER_URL` is provided to apps as an env var.
 
-This endpoint is app-specific - the router loads the consumer's manifest, finds the `[[services.v2.consumes]]` entry matching `<shortname>`, resolves the correct provider of the requested service, and proxies to `provider_app.BOTTLE_ROUTER_URL/<provider_endpoint>/<rest>`.
-
-The router identifies and authenticates the calling app two ways:
-- **Server-side calls:** must include `Authorization: Bearer $BOTTLE_APP_TOKEN`. Each app gets a unique `BOTTLE_APP_TOKEN` injected as an env var at deploy time.
-- **Browser calls:** the request's `Origin` is matched against the app's subdomain, with the owner session cookie authenticating the user. No bearer token is needed for these; the browser provides the cookie automatically.
+This endpoint is app-specific - the router identifies the calling app, loads its manifest, finds the `[[services.v2.consumes]]` entry matching `<shortname>`, resolves the correct provider of the requested service, and proxies to `provider_app.BOTTLE_ROUTER_URL/<provider_endpoint>/<rest>`. How you reach the router, and how it identifies your app, depends on where the call is made from.
 
 Service calls should be API-only - the user's browser should never be redirected to a service endpoint, with the exception of permission grant pages.
 
 If permission is needed to access the service, a 403 is returned - see the Permissions section below.
+
+#### Server-side calls
+
+Call the router's internal URL, `BOTTLE_ROUTER_URL`, with your app's token:
+
+```
+GET|POST|WS|... $BOTTLE_ROUTER_URL/api/services/v2/call/<shortname>/<rest>
+Authorization: Bearer $BOTTLE_APP_TOKEN
+```
+
+Both are provided as env vars. Each app gets a unique `BOTTLE_APP_TOKEN` at deploy time, which identifies it to the router. `BOTTLE_ROUTER_URL` is only reachable from inside the instance.
+
+#### Browser calls
+
+JavaScript running in the user's browser calls the router's public URL instead, with no token:
+
+```
+GET|POST|WS|... <public router URL>/api/services/v2/call/<shortname>/<rest>
+```
+
+The router identifies your app by matching the request's `Origin` against its subdomain, and the owner's session cookie, which the browser sends automatically, authenticates the user. The router answers cross-origin preflights from app origins. Send requests with `credentials: "include"` so the cookie goes along.
+
+To get the router's public URL:
+
+- Prefer the `X-OpenHost-Router-URL` header on the request that served the page, and pass it to your frontend. It's the router on whichever of the instance's domains the visitor used.
+- Fall back to `BOTTLE_ROUTER_PUBLIC_URL` (the router on the primary domain) only when there's no request to read the header from, as with a static frontend.
 
 ### Provider selection
 
