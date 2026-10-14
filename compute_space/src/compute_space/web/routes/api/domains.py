@@ -2,8 +2,8 @@
 
 Adding a TLS domain kicks off ACME acquisition in the background (the same
 ``ensure_cert_for`` routine used at initial setup); the domain is served immediately via
-Caddy's internal CA and flips to its real cert when acquisition completes.  Adding an mDNS
-`.local` domain is active immediately (served over http).  All changes update the active
+Caddy's internal CA and flips to its real cert when acquisition completes.  Adding a `.local`
+domain (published over mDNS) is active immediately (served over http).  All changes update the active
 config (so routing sees them) and regenerate + restart Caddy (so it terminates/serves them).
 """
 
@@ -70,15 +70,13 @@ _DOMAIN_RE = re.compile(rf"^{_LABEL}(\.{_LABEL})+$")
 @attr.s(auto_attribs=True, frozen=True)
 class AddDomainRequest:
     name: str
-    tls: bool = False
-    mdns: bool = False
+    tls: bool
 
 
 @attr.s(auto_attribs=True, frozen=True)
 class DomainInfo:
     name: str
     tls: bool
-    mdns: bool
     scheme: str
     cert_status: DomainCertStatus
     error_message: str | None
@@ -118,7 +116,6 @@ def _domain_info(config: Config, domain: Domain, record: DomainRecord | None) ->
     return DomainInfo(
         name=name,
         tls=domain.tls,
-        mdns=domain.mdns,
         scheme=domain.scheme,
         cert_status=cert_status,
         error_message=error,
@@ -160,16 +157,15 @@ async def _acquire_cert(config: Config, domain: Domain, dns_provider: InternalDn
 
 def _validate_new_domain(
     config: Config,
-    name: str,
-    tls: bool,
-    mdns: bool,
+    domain: Domain,
     db: sqlite3.Connection,
 ) -> str | None:
+    name = domain.name
     if not name:
         return "domain name is required"
     if not _DOMAIN_RE.match(name):
         return "invalid domain name"
-    if mdns and tls:
+    if domain.mdns and domain.tls:
         return "Local domains are served over HTTP; set tls=false"
     if any(d.name_no_port == name for d in effective_domains(db)):
         return "domain is already configured"
@@ -189,23 +185,22 @@ async def add_domain(
     dns_provider: NamedDependency[InternalDnsProvider],
 ) -> Response[DomainListResponse]:
     name = data.name.strip().lower()
-    error = _validate_new_domain(config, name, data.tls, data.mdns, db)
+    domain = Domain(name=name, tls=data.tls)
+    error = _validate_new_domain(config, domain, db)
     if error is not None:
         raise ValidationException(detail=error)
 
-    domain = Domain(name=name, tls=data.tls, mdns=data.mdns)
     # TLS domains start as `acquiring` (served via `tls internal` until the real cert lands);
     # non-TLS (.local) domains are immediately active over http.
     upsert_record(
         db,
         DomainRecord(
             name=name,
-            tls=data.tls,
-            mdns=data.mdns,
-            cert_status=DomainCertStatus.ACQUIRING if data.tls else DomainCertStatus.ACTIVE,
+            tls=domain.tls,
+            cert_status=DomainCertStatus.ACQUIRING if domain.tls else DomainCertStatus.ACTIVE,
         ),
     )
-    if not data.mdns:
+    if not domain.mdns:
         try:
             await dns_provider.add_zone(name)
         except DnsNotEnabled:
@@ -214,7 +209,7 @@ async def add_domain(
             # domain surfaces the consequence through its cert status, below.
             logger.warning("Added {} but this instance is not serving DNS for it", name)
     background: list[BackgroundTask] = [BackgroundTask(_reload_caddy_after_response)]
-    if data.tls:
+    if domain.tls:
         background.append(BackgroundTask(_acquire_cert, config, domain, dns_provider))
     return Response(
         DomainListResponse(domains=_domain_list(config, db)),
@@ -325,7 +320,7 @@ async def remove_domain(
         if current is not None and current.is_primary:
             raise ValidationException(detail="cannot remove the primary domain")
         raise NotFoundException(detail="domain not found")
-    if removed is not None and not removed.mdns:
+    if removed is not None and not removed.to_domain().mdns:
         await dns_provider.remove_zone(name)
     # Regenerate Caddy only after this response has been sent — see _reload_caddy_after_response.
     return Response(

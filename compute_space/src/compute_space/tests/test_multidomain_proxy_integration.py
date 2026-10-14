@@ -56,7 +56,7 @@ from compute_space.tests.conftest import open_db
 from compute_space.web.middleware.subdomain_proxy import SubdomainProxyMiddleware
 
 PRIMARY = Domain(name="host.example.com", tls=True)
-LOCAL = Domain(name="myhost.local", tls=False, mdns=True)
+LOCAL = Domain(name="myhost.local", tls=False)
 
 
 class _EchoBackend(BaseHTTPRequestHandler):
@@ -137,7 +137,7 @@ def proxy_config(tmp_path: Path, backend_port: int) -> Config:
     cfg = _make_test_config(tmp_path, seed_primary=False)  # this test seeds the full set itself
     init_db(cfg.db_path)
     with closing(open_db(cfg)) as db:
-        seed_domains(db, PRIMARY, [DomainRecord(LOCAL.name, LOCAL.tls, LOCAL.mdns)])
+        seed_domains(db, PRIMARY, [DomainRecord(LOCAL.name, LOCAL.tls)])
     _seed_app(cfg.db_path, "myapp", backend_port, public_paths=["/"])
     # App ports are unique in the DB; this app is only used for auth/interception tests.
     _seed_app(cfg.db_path, "privapp", backend_port + 1, public_paths=[])
