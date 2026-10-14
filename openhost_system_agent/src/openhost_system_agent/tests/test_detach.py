@@ -219,7 +219,7 @@ def test_walk_order_preflight_then_stop_then_tree(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(update_mod, "launch_updater", _noting(order, "launch_updater", True))
     monkeypatch.setattr(update_mod, "stop_openhost", lambda: order.append("stop_openhost"))
     monkeypatch.setattr(update_mod, "_repo", lambda: _Repo(order))
-    monkeypatch.setattr(update_mod, "_get_sorted_tags", lambda _r, **_kw: ["v1"])
+    monkeypatch.setattr(update_mod, "_get_sorted_tags", lambda _r: ["v1"])
     monkeypatch.setattr(update_mod, "_next_step", lambda _r: "v1")
     monkeypatch.setattr(update_mod, "_resolve_ref_sha", lambda _r, ref: ref)
     monkeypatch.setattr("openhost_system_agent.update.os.execv", lambda *_a: order.append("execv"))
@@ -257,7 +257,7 @@ def test_failed_stop_cleans_up_the_updater(monkeypatch: pytest.MonkeyPatch, prog
     monkeypatch.setattr(update_mod, "stop_openhost", _stop)
     monkeypatch.setattr(update_mod, "stop_updater", lambda: events.append("stop_updater"))
     monkeypatch.setattr(update_mod, "_repo", lambda: _Repo())
-    monkeypatch.setattr(update_mod, "_get_sorted_tags", lambda _r, **_kw: ["v1"])
+    monkeypatch.setattr(update_mod, "_get_sorted_tags", lambda _r: ["v1"])
     monkeypatch.setattr(update_mod, "_next_step", lambda _r: "v1")
 
     with pytest.raises(RuntimeError, match="Interactive authentication"):
@@ -276,7 +276,7 @@ def test_successful_stop_leaves_the_updater_serving(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(update_mod, "stop_openhost", lambda: None)
     monkeypatch.setattr(update_mod, "stop_updater", lambda: pytest.fail("the downtime still needs covering"))
     monkeypatch.setattr(update_mod, "_repo", lambda: repo)
-    monkeypatch.setattr(update_mod, "_get_sorted_tags", lambda _r, **_kw: ["v1"])
+    monkeypatch.setattr(update_mod, "_get_sorted_tags", lambda _r: ["v1"])
     monkeypatch.setattr(update_mod, "_next_step", lambda _r: "v1")
     monkeypatch.setattr(update_mod, "_resolve_ref_sha", lambda _r, ref: ref)
 

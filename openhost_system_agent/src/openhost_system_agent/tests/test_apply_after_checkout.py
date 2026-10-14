@@ -122,19 +122,38 @@ def test_ancestor_tag_skips_nearer_non_release_tag(tmp_path: Path) -> None:
     assert aac._next_step(str(repo)) is None
 
 
-def test_sorted_tags_with_prereleases(tmp_path: Path) -> None:
+def test_candidates_are_never_stepping_stones(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path / "repo", ["v1.0.0-rc.1", "v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"])
-    # v1.0.0-rc.1 is superseded by its release; the open candidates sort before their (future) release.
-    assert aac._get_sorted_tags(str(repo), prereleases=True) == ["v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"]
     assert aac._get_sorted_tags(str(repo)) == ["v1.0.0"]
+    assert aac._newest_candidate(str(repo)) == "v1.1.0-rc.2"
 
 
-def test_walk_with_prereleases_reaches_latest_candidate_then_release(tmp_path: Path) -> None:
+def test_current_tag_prefers_release_sharing_a_candidates_commit(tmp_path: Path) -> None:
+    # REGRESSION guard: see the same test in test_update.py.
+    repo = _make_repo(tmp_path / "repo", ["v1.0.0", "v1.1.0-rc.1"])
+    _git(repo, "tag", "v1.1.0")
+    _git(repo, "config", aac._PRERELEASES_CONFIG, "true")
+    assert aac._current_tag(str(repo)) == "v1.1.0"
+    assert _walk(repo) == []
+
+
+def test_walk_with_prereleases_hops_to_newest_candidate_then_release(tmp_path: Path) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0", "v1.2.0-rc.1", "v1.2.0-rc.2"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    _git(local, "config", aac._PRERELEASES_CONFIG, "true")
+    # Releases as stepping stones as usual, then straight to the newest candidate, skipping rc.1.
+    assert _walk(local) == ["v1.1.0", "v1.2.0-rc.2"]
+
+    _commit(remote, "release v1.2.0")
+    _git(remote, "tag", "v1.2.0")
+    _git(local, "fetch", "origin", "--tags")
+    assert _walk(local) == ["v1.2.0"]
+
+
+def test_walk_not_opted_in_ignores_candidates(tmp_path: Path) -> None:
     remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"])
     local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
-    assert _walk(local) == []  # not opted in: candidates are invisible
-    _git(local, "config", aac._PRERELEASES_CONFIG, "true")
-    assert _walk(local) == ["v1.1.0-rc.1", "v1.1.0-rc.2"]
+    assert _walk(local) == []
 
     _commit(remote, "release v1.1.0")
     _git(remote, "tag", "v1.1.0")
@@ -151,6 +170,18 @@ def test_walk_opted_out_on_candidate_waits_for_release(tmp_path: Path) -> None:
     _git(remote, "tag", "v1.1.0")
     _git(local, "fetch", "origin", "--tags")
     assert _walk(local) == ["v1.1.0"]
+
+
+def test_walk_on_candidate_never_steps_back_to_older_line(tmp_path: Path) -> None:
+    # REGRESSION guard: see test_candidate_host_is_not_walked_back_to_an_older_lines_release in test_update.py.
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    _git(remote, "checkout", "-b", "v1.0.x", "v1.0.0")
+    _commit(remote, "fix")
+    _git(remote, "tag", "v1.0.1")
+    _git(remote, "checkout", "main")
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.1.0-rc.1")
+    _git(local, "config", aac._PRERELEASES_CONFIG, "true")
+    assert _walk(local) == []
 
 
 def test_walk_pinned_ignores_prereleases(tmp_path: Path) -> None:

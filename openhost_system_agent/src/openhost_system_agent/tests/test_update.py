@@ -109,14 +109,26 @@ def test_version_key_orders_candidates_before_release() -> None:
     assert vk("v1.0.0") < vk("v1.1.0-rc.1") < vk("v1.1.0-rc.2") < vk("v1.1.0-rc.10") < vk("v1.1.0") < vk("v1.1.1-rc.1")
 
 
-def test_get_sorted_tags_with_prereleases_drops_superseded(tmp_path: Path) -> None:
-    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0-rc.1", "v1.0.0", "v1.1.0-rc.1"])
-    _git(repo_dir, "tag", "v1.1.0-beta")  # not a candidate: ignored either way
-    _git(repo_dir, "tag", "v1.1.0-rc2")  # undotted: not a candidate either
+def test_candidates_are_never_stepping_stones(tmp_path: Path) -> None:
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0-rc.1", "v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"])
+    _git(repo_dir, "tag", "v1.1.0-beta")  # not a candidate: ignored
+    _git(repo_dir, "tag", "v1.1.0-rc3")  # undotted: not a candidate either
     repo = git.Repo(repo_dir)
 
-    assert update_mod._get_sorted_tags(repo, prereleases=True) == ["v1.0.0", "v1.1.0-rc.1"]
     assert update_mod._get_sorted_tags(repo) == ["v1.0.0"]
+    assert update_mod._newest_candidate(repo) == "v1.1.0-rc.2"
+
+
+def test_current_tag_prefers_release_sharing_a_candidates_commit(tmp_path: Path) -> None:
+    # REGRESSION guard: git describe may name the candidate, and the walk would then "step" onto the release's
+    # identical commit forever.
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0", "v1.1.0-rc.1"])
+    _git(repo_dir, "tag", "v1.1.0")  # released as-is, on the candidate's commit
+    repo = git.Repo(repo_dir)
+    repo.git.config(update_mod._PRERELEASES_CONFIG, "true")
+
+    assert update_mod._current_tag(repo) == "v1.1.0"
+    assert update_mod._next_step(repo) is None
 
 
 def test_get_sorted_tags_filters_non_release_and_sorts(tmp_path: Path) -> None:
@@ -242,8 +254,42 @@ def test_apply_update_steps_onto_candidate_when_opted_in(tmp_path: Path, monkeyp
 
     update_mod.apply_update()
 
-    assert update_mod._current_tag(local, prereleases=True) == "v1.1.0-rc.1"
+    assert update_mod._current_tag(local) == "v1.1.0-rc.1"
     assert len(calls) == 1
+
+
+def test_opted_in_walk_takes_releases_then_one_hop_to_newest_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0", "v1.2.0-rc.1", "v1.2.0-rc.2"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+    update_mod.set_prereleases(True)
+
+    hops: list[str] = []
+    while (step := update_mod._next_step(local)) is not None:
+        assert len(hops) < 10, hops
+        hops.append(step)
+        local.git.checkout(step)
+    assert hops == ["v1.1.0", "v1.2.0-rc.2"]
+
+
+def test_candidate_host_is_not_walked_back_to_an_older_lines_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A v1.0.1 fix on the old line is newer than the last release in the candidate's history (v1.0.0), but older
+    # than the candidate itself. Stepping onto it would downgrade, and the candidate hop would bounce back forever.
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    _git(remote, "checkout", "-b", "v1.0.x", "v1.0.0")
+    _commit_and_tag(remote, "v1.0.1")
+    _git(remote, "checkout", "main")
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.1.0-rc.1")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+
+    for opted_in in (True, False):
+        update_mod.set_prereleases(opted_in)
+        assert update_mod._next_step(local) is None
+        assert update_mod.fetch_updates().state == "UP_TO_DATE"
 
 
 def test_apply_update_on_latest_hands_off_without_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -507,7 +553,6 @@ def test_set_prereleases_round_trips(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert info.ref == "v1.1.0-rc.1"  # the candidate actually running, for display
     # Kept across a channel change, so it is still set on returning to tags; a pin just doesn't act on it.
     assert update_mod.set_remote_url(f"file://{remote}@v1.0.0").prereleases is True
-    assert update_mod._include_prereleases(local) is False
     assert update_mod.set_prereleases(False).prereleases is False
 
 
