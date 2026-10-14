@@ -376,7 +376,8 @@ def apply_update() -> NoReturn:
 
         progress.record("fetch", "Fetching latest code\u2026")
         _fetch_chown_host(repo, "origin", "--tags", kill_after_timeout=_FETCH_TIMEOUT_SECONDS)
-        if not _get_sorted_tags(repo, _include_prereleases(repo)) and _get_target_ref(repo) is None:
+        # Candidates count here whatever the setting: this only refuses a remote with nothing tagged at all.
+        if not _get_sorted_tags(repo, prereleases=True) and _get_target_ref(repo) is None:
             raise RuntimeError("No tags found on remote. Tag a release first.")
 
         # The first step; apply_after_checkout tail-calls through the rest.
