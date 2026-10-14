@@ -55,12 +55,20 @@
   // except a gateway error from Caddy while it comes up, or a 503 while the app
   // behind this URL is still starting. Redirects aren't followed: a redirect to
   // another origin (e.g. to log in) would fail CORS, and the updater never
-  // redirects, so one already means the instance is back.
+  // redirects, so one already means the instance is back. Those gateway errors
+  // only buy APP_GRACE_MS from the first unmarked answer, though: an app that
+  // never comes back would otherwise keep viewers here forever, when its real
+  // error page is the honest thing to show.
+  var APP_GRACE_MS = 90000;
+  var unmarkedSince = null;
   function pageIsBack() {
     return fetch(window.location.href, { method: 'GET', cache: 'no-store', redirect: 'manual' })
       .then(function (r) {
         if (r.type === 'opaqueredirect') return true;
-        return !r.headers.get('X-OpenHost-Updater') && [502, 503, 504].indexOf(r.status) === -1;
+        if (r.headers.get('X-OpenHost-Updater')) return false;
+        if ([502, 503, 504].indexOf(r.status) === -1) return true;
+        if (unmarkedSince === null) unmarkedSince = Date.now();
+        return Date.now() - unmarkedSince > APP_GRACE_MS;
       })
       .catch(function () { return false; });
   }

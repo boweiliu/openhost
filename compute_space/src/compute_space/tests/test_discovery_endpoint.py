@@ -19,7 +19,7 @@ from compute_space.web.middleware.subdomain_proxy import SubdomainProxyMiddlewar
 from compute_space.web.routes.api.discovery import discovery_routes
 
 PRIMARY = Domain(name="host.example.com", tls=True)
-LOCAL = Domain(name="myhost.local:8080", tls=False, mdns=True)
+LOCAL = Domain(name="myhost.local:8080", tls=False)
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def wrapped_app(tmp_path: Path) -> Any:
     cfg: Config = _make_test_config(tmp_path, seed_primary=False)
     init_db(cfg.db_path)
     with closing(open_db(cfg)) as db:
-        seed_domains(db, PRIMARY, [DomainRecord(LOCAL.name, LOCAL.tls, LOCAL.mdns)])
+        seed_domains(db, PRIMARY, [DomainRecord(LOCAL.name, LOCAL.tls)])
     return SubdomainProxyMiddleware(Litestar(route_handlers=[discovery_routes], openapi_config=None))
 
 
