@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import time
+from enum import StrEnum
 
 import cattrs
 
@@ -135,18 +136,27 @@ def _start_apply() -> None:
     _run_system_agent("update", "apply", timeout=60)
 
 
-async def system_agent_apply() -> bool:
+class ApplyLaunch(StrEnum):
+    STARTED = "started"
+    ALREADY_RUNNING = "already_running"
+    FAILED = "failed"
+
+
+async def system_agent_apply() -> ApplyLaunch:
     """Hand the update to the detached apply unit, which stops openhost next. The caller must hold ``apply_lock``.
 
-    Returns False if the walk could not be started. The failure is then recorded in the progress log, the update token
-    cleared, and ``apply_lock`` released so a retry can run.
+    The lock stays held only when this started the walk. Otherwise it is released so a retry can run, and on FAILED
+    the failure is also recorded in the progress log and the update token cleared.
     """
     try:
         await _start_apply()
     except Exception as e:
+        apply_lock.release()
         if _ALREADY_RUNNING in str(e):
+            # Started outside this process (e.g. from the CLI). Don't hold the lock for it: if it fails before
+            # stopping openhost, nothing would ever release it.
             logger.warning("apply already in progress; leaving its progress log alone")
-            return True
+            return ApplyLaunch.ALREADY_RUNNING
         # Not just SystemAgentError: ANY failure must leave the log terminal, or
         # the /updating page would poll forever with no explanation.
         logger.exception("system agent apply failed")
@@ -155,9 +165,8 @@ async def system_agent_apply() -> bool:
             await system_agent_clear_update_token()
         except SystemAgentError:
             logger.exception("failed to clear update token")
-        apply_lock.release()
-        return False
-    return True
+        return ApplyLaunch.FAILED
+    return ApplyLaunch.STARTED
 
 
 async def record_apply_failure(message: str) -> None:

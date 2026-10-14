@@ -12,6 +12,7 @@ from compute_space.core.auto_update.config import AutoUpdateOutcome
 from compute_space.core.auto_update.config import read_auto_update_config
 from compute_space.core.auto_update.config import record_last_run
 from compute_space.core.logging import logger
+from compute_space.core.system_agent.client import ApplyLaunch
 from compute_space.core.system_agent.client import SystemAgentError
 from compute_space.core.system_agent.client import apply_lock
 from compute_space.core.system_agent.client import system_agent_apply
@@ -20,6 +21,9 @@ from compute_space.core.system_agent.client import system_agent_get_remote
 from compute_space.core.system_agent.client import system_agent_status
 from compute_space.db import get_db
 from openhost_system_agent.protocol import UpdateChannel
+
+# Pause after an unexpected error before trying again, so a persistent one doesn't spin.
+ERROR_BACKOFF = timedelta(minutes=5)
 
 # Should be set when the schedule changes, so the sleeping task picks up the new time.
 _reschedule = asyncio.Event()
@@ -76,14 +80,37 @@ async def run_auto_update() -> None:
     if apply_lock.locked():
         _record(AutoUpdateLastRun(at=now, outcome=AutoUpdateOutcome.ALREADY_RUNNING))
         return
-    # Held for the rest of this process's life once the walk is launched: the apply stops openhost moments later, so
-    # releasing early would only let a Settings click race the walk. A launch failure releases it for a retry.
-    await apply_lock.acquire()
     # The apply stops this process, so there is no later point to record how the update went. Record that it started;
-    # the update progress log has the rest.
+    # the update progress log has the rest. Done before taking the lock so a failed write can't leave it held.
     _record(AutoUpdateLastRun(at=now, outcome=AutoUpdateOutcome.STARTED))
-    if not await system_agent_apply():
+    # Held for the rest of this process's life once the walk is launched: the apply stops openhost moments later, so
+    # releasing early would only let a Settings click race the walk. system_agent_apply releases it if no walk starts.
+    await apply_lock.acquire()
+    launch = await system_agent_apply()
+    if launch == ApplyLaunch.ALREADY_RUNNING:
+        _record(AutoUpdateLastRun(at=now, outcome=AutoUpdateOutcome.ALREADY_RUNNING))
+    elif launch == ApplyLaunch.FAILED:
         _record(AutoUpdateLastRun(at=now, outcome=AutoUpdateOutcome.FAILED, detail="the update could not be started."))
+
+
+async def _wait_and_run() -> None:
+    """Sleep until the next scheduled time (or a schedule change), then run the update if it's enabled."""
+    with closing(get_db()) as db:
+        config = read_auto_update_config(db)
+    delay = (next_run_at(config.time_utc) - datetime.now(UTC)).total_seconds()
+
+    # Wait for the next scheduled time, or until the schedule changes.
+    try:
+        await asyncio.wait_for(_reschedule.wait(), delay)
+    except TimeoutError:
+        pass
+    else:
+        # schedule changed, so recalculate the next run time and wait again.
+        _reschedule.clear()
+        return
+
+    if config.enabled:
+        await run_auto_update()
 
 
 def start_auto_update_task() -> asyncio.Task[None]:
@@ -91,26 +118,12 @@ def start_auto_update_task() -> asyncio.Task[None]:
 
     async def _run() -> None:
         while True:
-            with closing(get_db()) as db:
-                config = read_auto_update_config(db)
-            delay = (next_run_at(config.time_utc) - datetime.now(UTC)).total_seconds()
-
-            # Wait for the next scheduled time, or until the schedule changes.
+            # Everything inside the try: an escaped exception would end the task, silently stopping auto-updates
+            # until the next restart.
             try:
-                await asyncio.wait_for(_reschedule.wait(), delay)
-            except TimeoutError:
-                pass
-            else:
-                # schedule changed, so recalculate the next run time and wait again.
-                _reschedule.clear()
-                continue
-
-            if not config.enabled:
-                continue
-
-            try:
-                await run_auto_update()
+                await _wait_and_run()
             except Exception:
-                logger.exception("scheduled update failed")
+                logger.exception(f"scheduled update failed; retrying in {ERROR_BACKOFF}")
+                await asyncio.sleep(ERROR_BACKOFF.total_seconds())
 
     return asyncio.create_task(_run(), name="auto-update")

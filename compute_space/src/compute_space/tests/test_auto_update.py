@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing
 from datetime import UTC
 from datetime import datetime
 from datetime import time
+from datetime import timedelta
 from datetime import tzinfo
 from pathlib import Path
 
@@ -246,6 +248,55 @@ async def test_runner_skips_while_another_update_holds_the_lock(
     await runner_mod.run_auto_update()
     assert agent.applied == 0
     assert _outcome(migrated_db) == AutoUpdateOutcome.ALREADY_RUNNING
+
+
+@pytest.mark.asyncio
+async def test_runner_releases_lock_when_a_walk_is_already_running(
+    agent: FakeAgent, migrated_db: sqlite3.Connection
+) -> None:
+    # A walk started outside compute_space (e.g. the CLI) may fail before stopping openhost; holding the lock for it
+    # would block every later update until restart.
+    agent.apply_error = client_mod.SystemAgentError("An update is already in progress.")
+    await runner_mod.run_auto_update()
+    assert _outcome(migrated_db) == AutoUpdateOutcome.ALREADY_RUNNING
+    assert not client_mod.apply_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_runner_failed_record_does_not_leak_lock(
+    agent: FakeAgent, migrated_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def failing_record(run: AutoUpdateLastRun) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(runner_mod, "_record", failing_record)
+    with pytest.raises(sqlite3.OperationalError):
+        await runner_mod.run_auto_update()
+    assert agent.applied == 0
+    assert not client_mod.apply_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_survives_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+    second_call = asyncio.Event()
+
+    async def wait_and_run() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("invalid auto_update_enabled setting")
+        second_call.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(runner_mod, "_wait_and_run", wait_and_run)
+    monkeypatch.setattr(runner_mod, "ERROR_BACKOFF", timedelta(0))
+    task = runner_mod.start_auto_update_task()
+    try:
+        await asyncio.wait_for(second_call.wait(), 5)
+    finally:
+        task.cancel()
+    assert calls == 2
 
 
 def test_last_run_roundtrip(migrated_db: sqlite3.Connection) -> None:
