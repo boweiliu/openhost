@@ -70,7 +70,7 @@ def default_time_utc() -> time:
 
 
 def read_auto_update_config(db: sqlite3.Connection) -> AutoUpdateConfig:
-    # No row means a fresh instance; migration v15 seeds "0" on instances that predate auto-updates, so they keep not
+    # No row means a fresh instance; migration v16 seeds "0" on instances that predate auto-updates, so they keep not
     # updating themselves until the owner opts in.
     enabled_raw = get_setting(db, ENABLED_KEY)
     if enabled_raw not in (None, "0", "1"):

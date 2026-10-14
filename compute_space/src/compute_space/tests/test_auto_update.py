@@ -82,8 +82,8 @@ def test_default_time_is_4am_server_time(migrated_db: sqlite3.Connection) -> Non
     assert (local.hour, local.minute) == (4, 0)
 
 
-def test_existing_instance_migrated_to_v15_stays_disabled(tmp_path: Path) -> None:
-    # An instance that predates auto-updates reaches v15 through the migration, not schema.sql.
+def test_existing_instance_migrated_to_v16_stays_disabled(tmp_path: Path) -> None:
+    # An instance that predates auto-updates reaches v16 through the migration, not schema.sql.
     db_path = str(tmp_path / "router.db")
     with closing(sqlite3.connect(db_path)) as db:
         db.executescript((Path(__file__).parent / "snapshots" / "empty" / "v0001.sql").read_text())

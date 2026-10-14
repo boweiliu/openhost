@@ -1,4 +1,4 @@
--- v15: keep automatic instance updates off on instances that predate them.
+-- v16: keep automatic instance updates off on instances that predate them.
 --
 -- A fresh DB is initialised from schema.sql and skips this, so it has no
 -- ``auto_update_enabled`` row and gets the default (on). An existing instance
