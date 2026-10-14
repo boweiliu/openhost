@@ -13,7 +13,9 @@ ref's own code.
 
 The destination is the latest release tag, unless a target ref is pinned
 (git config openhost.target-ref, e.g. a feature branch) — then the tags are
-still walked as stepping stones and the pinned ref is the final hop.
+still walked as stepping stones and the pinned ref is the final hop. With no
+pin, release candidates count as tags too when the owner opted in (git config
+openhost.prereleases).
 
 Migrations run before `pixi install`, so a migration that upgrades the
 toolchain (e.g. pixi) takes effect before deps are installed.
@@ -43,14 +45,19 @@ from openhost_system_agent.updater import progress
 PIXI_BIN = "/home/host/.pixi/bin/pixi"
 
 # A release tag is "v" followed by dot-separated integers (v1, v1.2, v1.2.3).
-# Other v-prefixed tags (e.g. v1.2.0-rc1) are ignored so version parsing
-# can't crash on them.
+# A release candidate adds "-rc.N" (v1.2.0-rc.1) and is only walked when the owner
+# opts in. Any other v-prefixed tag is ignored so version parsing can't crash on it.
 _RELEASE_TAG = re.compile(r"v\d+(?:\.\d+)*")
+_RC_TAG = re.compile(r"v\d+(?:\.\d+)*-rc\.\d+")
 
 
 # When set, updates end on this ref (a branch tip or commit) instead of the
 # latest tag — kept in sync with update.py's _TARGET_REF_CONFIG.
 _TARGET_REF_CONFIG = "openhost.target-ref"
+
+# When true (and no target ref is pinned), release candidates are walked too —
+# kept in sync with update.py's _PRERELEASES_CONFIG.
+_PRERELEASES_CONFIG = "openhost.prereleases"
 
 
 def _git(project: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -65,31 +72,41 @@ def _ensure_repo_trusted(project: str) -> None:
         _git(project, "config", "--global", "--add", "safe.directory", project)
 
 
-def _version_key(tag_name: str) -> tuple[int, ...]:
-    return tuple(int(x) for x in tag_name.lstrip("v").split("."))
+def _version_key(tag_name: str) -> tuple[tuple[int, ...], int, int]:
+    version, _, rc = tag_name.lstrip("v").partition("-rc.")
+    # A release sorts after its own candidates: v1.2.0-rc.1 < v1.2.0-rc.2 < v1.2.0.
+    return tuple(int(x) for x in version.split(".")), 0 if rc else 1, int(rc or 0)
 
 
-def _get_sorted_tags(project: str) -> list[str]:
-    tags = [t for t in _git(project, "tag", "-l", "v*").stdout.strip().split("\n") if _RELEASE_TAG.fullmatch(t)]
-    return sorted(tags, key=_version_key)
+def _is_walk_tag(name: str, prereleases: bool) -> bool:
+    return bool(_RELEASE_TAG.fullmatch(name) or (prereleases and _RC_TAG.fullmatch(name)))
 
 
-def _current_tag(project: str) -> str | None:
+def _get_sorted_tags(project: str, prereleases: bool = False) -> list[str]:
+    names = [t for t in _git(project, "tag", "-l", "v*").stdout.strip().split("\n") if _is_walk_tag(t, prereleases)]
+    # A candidate whose release is out is superseded: the release is the stepping stone, as it is for everyone else.
+    released = {n for n in names if _RELEASE_TAG.fullmatch(n)}
+    names = [n for n in names if not (_RC_TAG.fullmatch(n) and n.partition("-rc.")[0] in released)]
+    return sorted(names, key=_version_key)
+
+
+def _current_tag(project: str, prereleases: bool = False) -> str | None:
     result = _git(project, "describe", "--tags", "--exact-match", "HEAD")
     tag = result.stdout.strip()
-    return tag if result.returncode == 0 and _RELEASE_TAG.fullmatch(tag) else None
+    return tag if result.returncode == 0 and _is_walk_tag(tag, prereleases) else None
 
 
-def _latest_ancestor_tag(project: str) -> str | None:
-    """The highest release tag in HEAD's history (HEAD included). Not ``git describe``, which returns only the
-    nearest tag of any name, so a non-release tag nearer to HEAD would hide every release behind it.
+def _latest_ancestor_tag(project: str, prereleases: bool = False) -> str | None:
+    """The highest release tag (or candidate, with ``prereleases``) in HEAD's history (HEAD included). Not ``git
+    describe``, which returns only the nearest tag of any name, so a non-release tag nearer to HEAD would hide every
+    release behind it.
 
     Kept in sync with update._latest_ancestor_tag.
     """
     result = _git(project, "tag", "--merged", "HEAD")
     if result.returncode != 0:
         return None
-    tags = sorted((t for t in result.stdout.split() if _RELEASE_TAG.fullmatch(t)), key=_version_key)
+    tags = sorted((t for t in result.stdout.split() if _is_walk_tag(t, prereleases)), key=_version_key)
     return tags[-1] if tags else None
 
 
@@ -97,6 +114,11 @@ def _target_ref(project: str) -> str | None:
     result = _git(project, "config", "--get", _TARGET_REF_CONFIG)
     value = result.stdout.strip()
     return value if result.returncode == 0 and value else None
+
+
+def _prereleases(project: str) -> bool:
+    result = _git(project, "config", "--get", "--bool", _PRERELEASES_CONFIG)
+    return result.returncode == 0 and result.stdout.strip() == "true"
 
 
 def _resolve_ref_sha(project: str, ref: str) -> str | None:
@@ -143,8 +165,9 @@ def _next_step(project: str) -> str | None:
     if target_sha is not None and _git(project, "rev-parse", "HEAD").stdout.strip() == target_sha:
         return None
 
-    base = _current_tag(project) or _latest_ancestor_tag(project)
-    later = [t for t in _get_sorted_tags(project) if base is None or _version_key(t) > _version_key(base)]
+    prereleases = target is None and _prereleases(project)
+    base = _current_tag(project, prereleases) or _latest_ancestor_tag(project, prereleases)
+    later = [t for t in _get_sorted_tags(project, prereleases) if base is None or _version_key(t) > _version_key(base)]
     if target_sha is not None:
         # Only step through tags the pinned target actually contains, so the
         # walk stays monotonic toward the target instead of ping-ponging.

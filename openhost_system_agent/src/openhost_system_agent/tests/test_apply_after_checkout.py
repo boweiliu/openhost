@@ -122,6 +122,46 @@ def test_ancestor_tag_skips_nearer_non_release_tag(tmp_path: Path) -> None:
     assert aac._next_step(str(repo)) is None
 
 
+def test_sorted_tags_with_prereleases(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path / "repo", ["v1.0.0-rc.1", "v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"])
+    # v1.0.0-rc.1 is superseded by its release; the open candidates sort before their (future) release.
+    assert aac._get_sorted_tags(str(repo), prereleases=True) == ["v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"]
+    assert aac._get_sorted_tags(str(repo)) == ["v1.0.0"]
+
+
+def test_walk_with_prereleases_reaches_latest_candidate_then_release(tmp_path: Path) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    assert _walk(local) == []  # not opted in: candidates are invisible
+    _git(local, "config", aac._PRERELEASES_CONFIG, "true")
+    assert _walk(local) == ["v1.1.0-rc.1", "v1.1.0-rc.2"]
+
+    _commit(remote, "release v1.1.0")
+    _git(remote, "tag", "v1.1.0")
+    _git(local, "fetch", "origin", "--tags")
+    assert _walk(local) == ["v1.1.0"]
+
+
+def test_walk_opted_out_on_candidate_waits_for_release(tmp_path: Path) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.1.0-rc.1")
+    # Off: the base is v1.0.0, nothing newer is a release, so stay put rather than going back.
+    assert _walk(local) == []
+    _commit(remote, "release v1.1.0")
+    _git(remote, "tag", "v1.1.0")
+    _git(local, "fetch", "origin", "--tags")
+    assert _walk(local) == ["v1.1.0"]
+
+
+def test_walk_pinned_ignores_prereleases(tmp_path: Path) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    _branch(remote, "feature", "f1")
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    _git(local, "config", aac._PRERELEASES_CONFIG, "true")
+    _set_target(local, "feature")
+    assert _walk(local) == ["feature"]
+
+
 def test_is_ancestor_helper(tmp_path: Path) -> None:
     remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0"])
     _branch_from(remote, "feature", "v1.0.0", "off old")
