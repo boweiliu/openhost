@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import socket
 import struct
+from typing import Any
 
 import pytest
 
 from compute_space.core.domains import Domain
+from compute_space.core.mdns import responder as responder_module
 from compute_space.core.mdns.answers import MDNS_PORT
 from compute_space.core.mdns.answers import build_answer
 from compute_space.core.mdns.packets import TYPE_A
@@ -72,6 +74,16 @@ def test_parse_query_ignores_responses_and_rejects_garbage() -> None:
         parse_query(struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0) + b"\xc0\x0c")  # pointer to itself
 
 
+def test_parse_query_rejects_reserved_label_types_and_non_utf8() -> None:
+    # A 0x80-prefixed "length" would otherwise read as a 191-byte label.
+    reserved = b"\xbf" + b"\xff" * 191 + b"\x06myhost\x05local\x00" + struct.pack("!HH", TYPE_A, 1)
+    with pytest.raises(MalformedPacket):
+        parse_query(struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0) + reserved)
+    not_utf8 = b"\x02\xff\xfe\x06myhost\x05local\x00" + struct.pack("!HH", TYPE_A, 1)
+    with pytest.raises(MalformedPacket):
+        parse_query(struct.pack("!HHHHHH", 0, 0, 1, 0, 0, 0) + not_utf8)
+
+
 def test_any_app_subdomain_gets_an_a_record() -> None:
     reply = _answer(("myapp.myhost.local", TYPE_A))
     assert reply is not None
@@ -134,3 +146,50 @@ async def test_responder_answers_over_the_wire() -> None:
 
     await responder.update((Domain("example.com", tls=True),))
     assert responder._sock is None
+
+
+async def _query_over_loopback(port: int, name: str, timeout: float = 5) -> bytes:
+    loop = asyncio.get_running_loop()
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as client:
+        client.setblocking(False)
+        client.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton("127.0.0.1"))
+        await loop.sock_sendto(client, _query_packet((name, TYPE_A)), ("224.0.0.251", port))
+        return await asyncio.wait_for(loop.sock_recv(client, 9000), timeout=timeout)
+
+
+@pytest.mark.asyncio
+async def test_a_packet_that_raises_is_skipped_and_the_next_one_answered(monkeypatch: pytest.MonkeyPatch) -> None:
+    responder = MdnsResponder(port=0)
+    await responder.update((Domain("myhost.local"),))
+    assert responder._sock is not None
+    port = responder._sock.getsockname()[1]
+    real_build_answer = build_answer
+    calls = 0
+
+    def flaky_build_answer(*args: Any) -> bytes | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("boom")
+        return real_build_answer(*args)
+
+    monkeypatch.setattr(responder_module, "build_answer", flaky_build_answer)
+    with pytest.raises(TimeoutError):
+        await _query_over_loopback(port, "first.myhost.local", timeout=0.5)
+    reply = await _query_over_loopback(port, "second.myhost.local")
+    assert _records(reply)[0][0] == "second.myhost.local"
+    await responder.stop()
+
+
+@pytest.mark.asyncio
+async def test_failing_to_listen_is_logged_not_raised_and_retried() -> None:
+    # A socket on the same port without SO_REUSEADDR keeps the responder from binding.
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blocker:
+        blocker.bind(("", 0))
+        port = blocker.getsockname()[1]
+        responder = MdnsResponder(port=port)
+        await responder.update((Domain("myhost.local"),))
+        assert responder._sock is None
+    await responder.update((Domain("myhost.local"),))
+    assert responder._sock is not None
+    await responder.stop()

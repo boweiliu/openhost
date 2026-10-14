@@ -32,27 +32,16 @@
 
 # LAN mode (a `.local` domain) splits the names in two: avahi publishes the bare domain, which is
 # the machine's own <hostname>.local, and the router's responder publishes every app subdomain under
-# it.  So the hostname must be the domain's label (`bottle` for bottle.local).  Leaving the bare name
-# to avahi also keeps the box findable (`ssh host@bottle.local`) when openhost is down or mid-upgrade.
-- name: LAN mode hostname and avahi
+# it.  So the hostname must be the domain's label (`bottle` for bottle.local); it is set alongside
+# the domain seed, in write_openhost_config.yml.  Leaving the bare name to avahi also keeps the box
+# findable (`ssh host@bottle.local`) when openhost is down or mid-upgrade.
+- name: LAN mode avahi
   when: (domain | default('')).split(':')[0].lower().endswith('.local')
-  vars:
-    lan_hostname: "{{ domain.split(':')[0].split('.')[0] | lower }}"
   block:
     - name: Check the LAN mode domain is a single label under .local
       assert:
         that: domain.split(':')[0].split('.') | length == 2
         fail_msg: "LAN mode needs a domain like bottle.local (the machine's hostname plus .local), got {{ domain }}"
-
-    - name: Set the hostname to the LAN mode domain's label
-      hostname:
-        name: "{{ lan_hostname }}"
-
-    - name: Resolve the new hostname locally
-      lineinfile:
-        path: /etc/hosts
-        regexp: '^127\.0\.1\.1\s'
-        line: "127.0.1.1 {{ lan_hostname }}"
 
     - name: Install avahi
       apt:

@@ -82,7 +82,7 @@ avahi publishes `bottle.local` and the router publishes every `<app>.bottle.loca
 
 notes:
 
-- the domain must be a single label under `.local`, and LAN mode sets the machine's hostname to that label (`bottle` for `bottle.local`). avahi, which LAN mode installs, publishes the bare `bottle.local` as the machine's own name; the router's responder publishes only the subdomains alongside it, on the same udp 5353.
+- the domain must be a single label under `.local`, and LAN mode sets the machine's hostname to that label (`bottle` for `bottle.local`) when it seeds the domain. a re-run with a different domain changes neither: change the domain through the dashboard instead. avahi, which LAN mode installs, publishes the bare `bottle.local` as the machine's own name; the router's responder publishes only the subdomains alongside it, on the same udp 5353.
 - macOS and iOS resolve multi-label names like `myapp.bottle.local` out of the box. on Linux, recent nss-mdns versions only resolve two-label names unless `/etc/mdns.allow` lists `.local.`. Windows support for multi-label `.local` names is inconsistent.
 - two boxes on the same network with the same `.local` domain will both answer; give each its own name.
 

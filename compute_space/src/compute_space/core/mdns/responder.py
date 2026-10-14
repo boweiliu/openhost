@@ -4,6 +4,7 @@ import asyncio
 import errno
 import socket
 import struct
+import time
 
 from compute_space.core.domains import Domain
 from compute_space.core.logging import logger
@@ -20,6 +21,8 @@ _MREQN = struct.Struct("@4s4si")
 # How often to look for new interfaces to join the group on (a USB NIC plugged in after boot, etc).
 _REJOIN_SECONDS = 30
 _MAX_PACKET = 9000
+# A packet that trips a bug is logged at most this often, so a querier repeating it can't flood the log.
+_ERROR_LOG_INTERVAL_SECONDS = 60
 
 
 class MdnsResponder:
@@ -39,16 +42,28 @@ class MdnsResponder:
         self._sock: socket.socket | None = None
         self._joined: set[int] = set()
         self._rejoin_task: asyncio.Task[None] | None = None
+        self._last_error_logged = float("-inf")
 
     @property
     def domains(self) -> tuple[str, ...]:
         return self._domains
 
     async def update(self, domains: tuple[Domain, ...]) -> None:
-        """Publish exactly the mDNS domains among ``domains``, starting or stopping the listener as needed."""
+        """Publish exactly the mDNS domains among ``domains``, starting or stopping the listener as needed.
+
+        mDNS is an extra, so failing to listen is logged rather than raised: the router still serves
+        everything else, and the next call (a domain change, or the next boot) tries again."""
         self._domains = tuple(d.name_no_port for d in domains if d.mdns)
         if self._domains and self._sock is None:
-            self._start()
+            try:
+                self._start()
+            except OSError:
+                logger.exception(
+                    f"mDNS: can't listen on udp {self._port}, so names under {', '.join(self._domains)} won't "
+                    "resolve on the LAN (another process may hold the port without SO_REUSEADDR); "
+                    "retrying on the next domain change or restart"
+                )
+                return
         elif not self._domains and self._sock is not None:
             await self.stop()
         if self._domains:
@@ -63,7 +78,11 @@ class MdnsResponder:
         # Bound to the group, not to every address: the kernel then delivers only datagrams sent to
         # the mDNS group (from the link, since multicast to 224.0.0.0/24 isn't routed), never unicast
         # from elsewhere.  Replies still get a real source address, from the interface they leave on.
-        sock.bind((_MDNS_GROUP, self._port))
+        try:
+            sock.bind((_MDNS_GROUP, self._port))
+        except OSError:
+            sock.close()
+            raise
         sock.setblocking(False)
         self._sock = sock
         asyncio.get_running_loop().add_reader(sock.fileno(), self._on_readable)
@@ -114,15 +133,23 @@ class MdnsResponder:
                 data, ancdata, _flags, addr = self._sock.recvmsg(_MAX_PACKET, socket.CMSG_SPACE(_PKTINFO.size))
             except BlockingIOError:
                 return
-            pktinfo = next(
-                (d for level, kind, d in ancdata if level == socket.IPPROTO_IP and kind == socket.IP_PKTINFO), None
-            )
-            if pktinfo is None:
-                raise RuntimeError("mDNS: received a packet without IP_PKTINFO, which the socket enables")
-            self._handle(data, pktinfo, addr)
+            # One bad packet mustn't stop the rest: anything it raises is a bug, logged (rate-limited,
+            # since anyone on the LAN can resend it) and skipped.
+            try:
+                self._handle(data, ancdata, addr)
+            except Exception:
+                now = time.monotonic()
+                if now - self._last_error_logged >= _ERROR_LOG_INTERVAL_SECONDS:
+                    self._last_error_logged = now
+                    logger.exception(f"mDNS: failed to handle a packet from {addr}; skipping it")
 
-    def _handle(self, data: bytes, pktinfo: bytes, addr: tuple[str, int]) -> None:
+    def _handle(self, data: bytes, ancdata: list[tuple[int, int, bytes]], addr: tuple[str, int]) -> None:
         assert self._sock is not None
+        pktinfo = next(
+            (d for level, kind, d in ancdata if level == socket.IPPROTO_IP and kind == socket.IP_PKTINFO), None
+        )
+        if pktinfo is None:
+            raise RuntimeError("received a packet without IP_PKTINFO, which the socket enables")
         ifindex, local_addr, _ = _PKTINFO.unpack_from(pktinfo)
         local_ip = socket.inet_ntoa(local_addr)
         if local_ip == "0.0.0.0":
