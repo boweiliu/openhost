@@ -58,11 +58,14 @@ _FALLBACK_BODY = (
 # URL token, and when /updates is not readable (no token / instance back) probe
 # the requested URL and reload so no viewer is ever stranded on this page.  The
 # probe treats a redirect, or any answer without the updater's marker header
-# that isn't a 502/503/504, as "back".
+# that isn't a 502/503/504, as "back" -- and so too an unmarked 502/503/504 once
+# 90s have passed since the first unmarked answer, so a dead app can't strand it.
 _FALLBACK_JS = (
-    "var t=new URLSearchParams(location.search).get('token')||'';var e=0;"
-    "function b(h){return h.type==='opaqueredirect'||"
-    "(!h.headers.get('X-OpenHost-Updater')&&[502,503,504].indexOf(h.status)<0)}"
+    "var t=new URLSearchParams(location.search).get('token')||'';var e=0;var u=null;"
+    "function b(h){if(h.type==='opaqueredirect')return true;"
+    "if(h.headers.get('X-OpenHost-Updater'))return false;"
+    "if([502,503,504].indexOf(h.status)<0)return true;"
+    "if(u===null)u=Date.now();return Date.now()-u>90000}"
     "function q(){return fetch(location.href,{cache:'no-store',redirect:'manual'})}"
     "function r(){q().then(function(h){if(b(h))location.reload()})"
     ".catch(function(){})}"
