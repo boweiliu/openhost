@@ -26,6 +26,7 @@ import yaml
 from jinja2 import Environment
 from jinja2 import FileSystemLoader
 from jinja2 import StrictUndefined
+from jinja2 import select_autoescape
 
 from compute_space.core import archive_backend
 from compute_space.core.archive_backend import read_state
@@ -331,7 +332,12 @@ def test_dashboard_s3_to_s3_migration_is_unchanged_once_formatted(cfg, tmp_path:
 
 
 def _render(**variables: object) -> str:
-    env = Environment(loader=FileSystemLoader(str(_REPO_ROOT / "ansible" / "templates")), undefined=StrictUndefined)
+    # select_autoescape escapes only html/xml templates, so the TOML template renders as ansible renders it.
+    env = Environment(
+        loader=FileSystemLoader(str(_REPO_ROOT / "ansible" / "templates")),
+        undefined=StrictUndefined,
+        autoescape=select_autoescape(),
+    )
     env.filters["bool"] = lambda value: str(value).lower() in ("true", "1", "yes")
     env.filters["to_json"] = json.dumps  # Ansible's to_json is json.dumps.
     base = {"domain": "alice.bottle.cloud", "tls": True, "effective_claim_token": "tok"}
