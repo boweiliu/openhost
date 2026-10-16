@@ -523,3 +523,14 @@ def test_recovery_that_formats_but_fails_to_mount_keeps_the_row_consistent(cfg, 
         fmt.assert_not_called()
         mnt.assert_called_once_with(cfg, "ak2", "sk2")
         assert read_state(db).configured_at is not None
+
+
+def test_never_seeds_a_claimed_instance(cfg, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    # E.g. a claimed instance whose archive never formatted (no meta DB) and a first_boot.toml rewritten later.
+    with closing(_db(cfg)) as db:
+        db.execute("INSERT INTO users (username, password_hash) VALUES ('owner', 'x')")
+        db.commit()
+    _write_first_boot(tmp_path)
+    seed_first_boot(cfg)
+    with closing(_db(cfg)) as db:
+        assert read_state(db).backend == "local"

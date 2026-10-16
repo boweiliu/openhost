@@ -161,8 +161,9 @@ def seed_first_boot(config: Config) -> None:
             primary = Domain(name=fb.domain, tls=fb.tls)
             seed_domains(db, primary, [])
             _seed_imbue_identity(db, fb)
-            if fb.archive_backend is not None:
-                # After seed_domains: the volume name derives from the primary domain.
+            if fb.archive_backend is not None and not owner_exists(config):
+                # Before the claim only (a stale file must not reconfigure an owned instance), and after
+                # seed_domains: the volume name derives from the primary domain.
                 archive_backend.seed_preconfigured_s3(
                     config,
                     db,
