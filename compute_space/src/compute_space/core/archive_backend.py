@@ -688,6 +688,12 @@ def seed_preconfigured_s3(
     return True
 
 
+def is_unformatted_seed(config: Config, state: BackendState) -> bool:
+    """A backend preconfigured at first boot whose volume was never formatted (e.g. its credentials were
+    rejected).  It holds no data, so configuring it is a fresh format, not a migration."""
+    return state.backend == "s3" and state.configured_at is None and not _local_volume_formatted(config)
+
+
 def _set_configured_now(db: sqlite3.Connection) -> None:
     db.execute(
         "UPDATE archive_backend SET configured_at = ? WHERE id = 1 AND configured_at IS NULL",
@@ -1296,7 +1302,7 @@ def configure_backend(
     migrating_from_local = state.backend == "local"
     # A backend preconfigured at first boot that never formatted (e.g. its credentials were rejected)
     # holds no data: configuring it formats the new bucket fresh, like a legacy 'disabled' zone.
-    seeded_unformatted = state.backend == "s3" and state.configured_at is None and not _local_volume_formatted(config)
+    seeded_unformatted = is_unformatted_seed(config, state)
     migrating_from_s3 = state.backend == "s3" and not seeded_unformatted
     if migrating_from_s3:
         # Source creds must exist for an s3->s3 migration; without them we
