@@ -39,7 +39,13 @@ class FirstBootArchiveBackend:
     s3_secret_access_key: str = attr.ib(repr=False)
 
 
-_ARCHIVE_BACKEND_REQUIRED = ("s3_bucket", "s3_endpoint", "s3_access_key_id", "s3_secret_access_key")
+def _archive_string(table: dict[str, object], key: str) -> str | None:
+    value = table.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"first_boot.toml: [archive_backend] {key} must be a string")
+    return value.strip() or None
 
 
 def _parse_archive_backend(raw: object) -> FirstBootArchiveBackend | None:
@@ -49,25 +55,29 @@ def _parse_archive_backend(raw: object) -> FirstBootArchiveBackend | None:
         return None
     if not isinstance(raw, dict):
         raise ValueError("first_boot.toml: [archive_backend] must be a table")
-    values: dict[str, str] = {}
-    for key in (*_ARCHIVE_BACKEND_REQUIRED, "s3_region"):
-        value = raw.get(key)
-        if value is None:
-            continue
-        if not isinstance(value, str):
-            raise ValueError(f"first_boot.toml: [archive_backend] {key} must be a string")
-        values[key] = value.strip()
-    missing = [key for key in _ARCHIVE_BACKEND_REQUIRED if not values.get(key)]
+    bucket = _archive_string(raw, "s3_bucket")
+    endpoint = _archive_string(raw, "s3_endpoint")
+    access_key_id = _archive_string(raw, "s3_access_key_id")
+    secret_access_key = _archive_string(raw, "s3_secret_access_key")
+    region = _archive_string(raw, "s3_region")
+    required = {
+        "s3_bucket": bucket,
+        "s3_endpoint": endpoint,
+        "s3_access_key_id": access_key_id,
+        "s3_secret_access_key": secret_access_key,
+    }
+    missing = [key for key, value in required.items() if value is None]
     if missing:
         raise ValueError(f"first_boot.toml: [archive_backend] is missing {', '.join(missing)}")
-    if not values["s3_endpoint"].startswith("https://"):
+    assert bucket and endpoint and access_key_id and secret_access_key
+    if not endpoint.startswith("https://"):
         raise ValueError("first_boot.toml: [archive_backend] s3_endpoint must be an https:// URL")
     return FirstBootArchiveBackend(
-        s3_bucket=values["s3_bucket"],
-        s3_endpoint=values["s3_endpoint"],
-        s3_region=values.get("s3_region") or None,
-        s3_access_key_id=values["s3_access_key_id"],
-        s3_secret_access_key=values["s3_secret_access_key"],
+        s3_bucket=bucket,
+        s3_endpoint=endpoint,
+        s3_region=region,
+        s3_access_key_id=access_key_id,
+        s3_secret_access_key=secret_access_key,
     )
 
 

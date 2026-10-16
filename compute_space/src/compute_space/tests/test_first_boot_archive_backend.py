@@ -483,3 +483,43 @@ def test_real_juicefs_formats_the_seeded_volume_on_s3(cfg, tmp_path: Path, s3_ga
     assert mnt.call_count == 2
     keys = [o["Key"] for o in client.list_objects_v2(Bucket="gwbucket").get("Contents", [])]
     assert f"{volume}/juicefs_uuid" in keys
+
+
+def test_never_seeds_when_a_metadata_db_exists_even_if_unreadable(cfg, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    # A locked or corrupt meta DB reads as "unformatted"; seeding must not trust that.
+    os.makedirs(archive_backend.juicefs_state_dir(cfg), exist_ok=True)
+    Path(archive_backend.juicefs_meta_db_path(cfg)).write_bytes(b"not a sqlite database")
+    _write_first_boot(tmp_path)
+    seed_first_boot(cfg)
+    with closing(_db(cfg)) as db:
+        assert read_state(db).backend == "local"
+
+
+def test_recovery_that_formats_but_fails_to_mount_keeps_the_row_consistent(cfg, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    with closing(_seeded(cfg, tmp_path)) as db:
+        with (
+            mock.patch.object(archive_backend, "is_juicefs_installed", return_value=True),
+            mock.patch.object(archive_backend, "_local_volume_formatted", return_value=False),
+            mock.patch.object(archive_backend, "format_s3_volume"),
+            mock.patch.object(archive_backend, "mount", side_effect=RuntimeError("mount timed out")),
+            mock.patch.object(archive_backend, "umount"),
+            pytest.raises(RuntimeError, match="mount timed out"),
+        ):
+            archive_backend.configure_backend(
+                cfg,
+                db,
+                s3_bucket="fixed",
+                s3_region="auto",
+                s3_endpoint=_ENDPOINT,
+                s3_prefix=None,
+                s3_access_key_id="ak2",
+                s3_secret_access_key="sk2",
+            )
+        state = read_state(db)
+        # The metadata now points at the new bucket; so does the row (not yet configured).
+        assert (state.s3_bucket, state.s3_access_key_id, state.configured_at) == ("fixed", "ak2", None)
+        # The next boot mounts it (already formatted) with the new credentials.
+        fmt, _, mnt = _attach(cfg, db, formatted=True)
+        fmt.assert_not_called()
+        mnt.assert_called_once_with(cfg, "ak2", "sk2")
+        assert read_state(db).configured_at is not None

@@ -668,8 +668,10 @@ def seed_preconfigured_s3(
     is inert.  ``configured_at`` stays NULL until :func:`attach_on_startup` has formatted and mounted
     the volume, which marks a seeded-but-not-yet-formatted backend.  Returns whether it seeded.
     """
-    if _local_volume_formatted(config):
-        logger.warning("Not seeding the preconfigured S3 archive backend: a volume is already formatted")
+    # Pristine means no metadata DB at all. Not ``_local_volume_formatted``: that reads an unreadable
+    # (locked, corrupt) DB as unformatted, which must not relabel an existing local archive.
+    if os.path.exists(_juicefs_meta_db(config)):
+        logger.warning("Not seeding the preconfigured S3 archive backend: a JuiceFS metadata DB already exists")
         return False
     volume = default_volume_name_for_zone(db)
     cursor = db.execute(
@@ -1415,6 +1417,16 @@ def configure_backend(
                 s3_secret_access_key=s3_secret_access_key,
                 juicefs_volume_name=volume,
             )
+            if seeded_unformatted:
+                # The volume now lives on the new bucket: record it before mounting, so a failed mount
+                # leaves the row matching the metadata (configured_at stays NULL until a mount succeeds;
+                # the next boot mounts it with these credentials).
+                db.execute(
+                    "UPDATE archive_backend SET s3_bucket=?, s3_region=?, s3_endpoint=?, s3_access_key_id=?, "
+                    "s3_secret_access_key=? WHERE id = 1",
+                    (s3_bucket, s3_region, s3_endpoint, s3_access_key_id, s3_secret_access_key),
+                )
+                db.commit()
             mount(config, s3_access_key_id, s3_secret_access_key)
 
         # Persist the new state.  If this fails after a successful re-point +
