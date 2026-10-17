@@ -244,10 +244,10 @@ The `grant` field on these endpoints is whatever shape the service defines, and 
 
 Each service URL has at most one default provider. Calls without an explicit provider use it; see Provider selection above for how it's resolved when the owner hasn't picked one.
 
-Both listing endpoints return an array of `{service_url, app_id, app_name, service_version, endpoint, status, is_default}`, with the router's builtins included as providers (`app_id: "_openhost_router"`, always `running`).
+Both listing endpoints describe each provider as `{service_url, app_id, app_name, service_version, endpoint, status, is_default}`, with the router's builtins included as providers (`app_id: "_openhost_router"`, always `running`).
 
-- `GET /api/services/v2`: list every provider of every service.
-- `GET /api/services/v2/providers?service=<url>`: the same, narrowed to one service. Accepts both owner auth and app bearer tokens, so consumer apps can discover providers at runtime.
+- `GET /api/services/v2`: an array of every provider of every service.
+- `GET /api/services/v2/providers?service=<url>`: `{"providers": [...]}`, narrowed to one service. Accepts both owner auth and app bearer tokens, so consumer apps can discover providers at runtime.
 - `POST /api/services/v2/defaults`: set the default. Body: `{service_url, app_id}`. Pass `_openhost_router` to hand the service to the router's builtin. 404 if that provider doesn't actually provide the service.
 - `DELETE /api/services/v2/defaults`: clear the owner's choice. Body: `{service_url}`. Selection then falls back to the builtin, or to the longest-serving provider app if there isn't one; calls return 503 if nothing is left to serve them.
 
