@@ -124,7 +124,7 @@ a.banner__text:hover {
 }
 
 .nav-menu__list a:active {
-  background: var(--bg-secondary);
+  background-image: linear-gradient(var(--interactive-active), var(--interactive-active));
 }
 
 .nav-menu__ext {
