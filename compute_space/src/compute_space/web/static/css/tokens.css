@@ -3,7 +3,7 @@
 
 :root {
   /* Color. Names match the Figma variables one to one: bg/status/info is
-     --bg-status-info. Translucent values are fg/primary at an opacity, so they
+     --bg-status-info. Translucent values are fg/primary (#121212) at an opacity, so they
      tint whatever surface they sit on. */
 
   /* bg */
@@ -20,10 +20,10 @@
   --bg-status-info: #e6f2ff;
 
   /* fg */
-  --fg-primary: #040724;
-  --fg-secondary: rgb(4 7 36 / 0.6);
-  --fg-border: rgb(4 7 36 / 0.12);
-  --fg-disabled: rgb(4 7 36 / 0.5);
+  --fg-primary: #121212;
+  --fg-secondary: rgb(18 18 18 / 0.6);
+  --fg-border: rgb(18 18 18 / 0.12);
+  --fg-disabled: rgb(18 18 18 / 0.5);
   --fg-inverted: #ffffff;
 
   /* fg/status */
@@ -37,8 +37,8 @@
      so they darken any fill without a separate hover color per component. */
   --interactive-primary: #a2d9ff;
   --interactive-accent: #d4ffbc;
-  --interactive-hover: rgb(4 7 36 / 0.05);
-  --interactive-active: rgb(4 7 36 / 0.1);
+  --interactive-hover: rgb(18 18 18 / 0.05);
+  --interactive-active: rgb(18 18 18 / 0.1);
   --interactive-inverted-hover: rgb(255 255 255 / 0.1);
   --interactive-inverted-active: rgb(255 255 255 / 0.15);
 

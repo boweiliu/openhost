@@ -8,7 +8,7 @@
 body {
   margin: 0;
   padding: 3em 1em;
-  color: #040724;
+  color: #121212;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 14px;
   font-weight: 500;
@@ -67,7 +67,7 @@ ul {
   margin: 0;
   padding: 12px;
   list-style: none;
-  background: #040724;
+  background: #121212;
   color: #ffffff;
   border: 1px solid #dadada;
   box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.1);
@@ -93,6 +93,6 @@ li.failed { border-left-color: #ff4d4d; color: #ff9d9d; }
 
 .hint {
   margin-top: 1.5em;
-  color: rgb(4 7 36 / 0.6);
+  color: rgb(18 18 18 / 0.6);
   font-size: 12px;
 }
