@@ -23,7 +23,7 @@
   /* fg */
   --fg-primary: #121212;
   --fg-secondary: rgb(18 18 18 / 0.6);
-  --fg-border: rgb(18 18 18 / 0.12);
+  --fg-border: rgb(18 18 18 / 0.2);
   --fg-disabled: rgb(18 18 18 / 0.5);
   --fg-inverted: #ffffff;
   --fg-inverted-secondary: rgb(255 255 255 / 0.6);
