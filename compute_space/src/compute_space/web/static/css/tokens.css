@@ -39,8 +39,6 @@
   --interactive-accent: #d4ffbc;
   --interactive-hover: rgb(18 18 18 / 0.05);
   --interactive-active: rgb(18 18 18 / 0.1);
-  --interactive-inverted-hover: rgb(255 255 255 / 0.1);
-  --interactive-inverted-active: rgb(255 255 255 / 0.15);
 
   /* Not in the Figma set yet. Kept at their old values until decided. */
   --color-surface-sunken: #f2f2f2;
