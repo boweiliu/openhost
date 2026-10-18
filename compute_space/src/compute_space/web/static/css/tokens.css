@@ -9,6 +9,7 @@
   /* bg */
   --bg-surface: #fcfcfc;
   --bg-primary: #ffffff;
+  --bg-secondary: #f2f2f2;
   --bg-sky: #eef8ff;
   --bg-meadow: #ecffe1;
   --bg-disabled: #dadada;
@@ -25,6 +26,7 @@
   --fg-border: rgb(18 18 18 / 0.12);
   --fg-disabled: rgb(18 18 18 / 0.5);
   --fg-inverted: #ffffff;
+  --fg-inverted-secondary: rgb(255 255 255 / 0.6);
 
   /* fg/status */
   --fg-status-negative: #9f3a34;
@@ -39,13 +41,6 @@
   --interactive-accent: #d4ffbc;
   --interactive-hover: rgb(18 18 18 / 0.05);
   --interactive-active: rgb(18 18 18 / 0.1);
-
-  /* Not in the Figma set yet. Kept at their old values until decided. */
-  --color-surface-sunken: #f2f2f2;
-  --color-border-strong: #b4b4b4;
-  /* Dimmed text on dark surfaces (log timestamps): fg/inverted at the same
-     60% as fg/secondary. Candidate for a Figma fg/inverted-secondary. */
-  --fg-inverted-secondary: rgb(255 255 255 / 0.6);
 
   /* Donut neutrals. Free headroom reads as a pale wash, host-but-not-app as a
      deep blue, so neither competes with the pastel per-app slices. */

@@ -124,7 +124,7 @@ a.banner__text:hover {
 }
 
 .nav-menu__list a:active {
-  background: var(--color-surface-sunken);
+  background: var(--bg-secondary);
 }
 
 .nav-menu__ext {
@@ -1010,7 +1010,7 @@ th.sortable:hover {
   max-width: min(300px, 72vw);
   padding: var(--space-3) var(--space-4);
   background: var(--bg-primary);
-  border: var(--border-w) solid var(--color-border-strong);
+  border: var(--border-w) solid var(--fg-border);
   box-shadow: var(--shadow-card);
   color: var(--fg-secondary);
   font-size: var(--text-xs);
@@ -1146,7 +1146,7 @@ input[type="radio"] {
   margin: 0;
   flex: none;
   background: var(--bg-primary);
-  border: var(--border-w) solid var(--color-border-strong);
+  border: var(--border-w) solid var(--fg-border);
   display: inline-grid;
   place-content: center;
   cursor: pointer;
@@ -1488,7 +1488,7 @@ select {
    a shade to separate from it. */
 
 .panel table {
-  background: var(--color-surface-sunken);
+  background: var(--bg-secondary);
 }
 
 .panel .table-scroll {
