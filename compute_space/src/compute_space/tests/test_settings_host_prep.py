@@ -22,9 +22,9 @@ from openhost_system_agent.protocol import MigrationStatus
 
 
 @pytest.fixture(autouse=True)
-def _fresh_apply_lock() -> None:
-    """A successful handoff deliberately never releases the lock -- in production
-    the process is stopped moments later. Tests need it released each time."""
+def _fresh_apply_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Successful fake launches stay active until the test's event loop shuts down."""
+    monkeypatch.setattr(client_mod, "_apply_is_running", lambda: True)
     if client_mod.apply_lock.locked():
         client_mod.apply_lock.release()
 

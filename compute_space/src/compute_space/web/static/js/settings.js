@@ -121,6 +121,9 @@ function pollRestart() {
 let savedRemote = '';
 // Update channel of the saved remote ('tags', 'branch' or 'pinned'), null until loaded.
 let savedChannel = null;
+// Whether the owner opted in to release candidates, null until loaded.
+let savedPrereleases = null;
+let savedPrereleasesError = null;
 // The saved auto-update settings, null until loaded.
 let autoUpdate = null;
 
@@ -206,11 +209,14 @@ async function loadRemote() {
     const data = await resp.json();
     savedRemote = remoteSpec(data);
     savedChannel = data.channel;
+    savedPrereleases = data.prereleases;
+    savedPrereleasesError = data.prereleases_error || null;
     input.value = savedRemote;
     input.placeholder = 'https://github.com/user/repo';
     input.disabled = false;
     input.addEventListener('input', renderRemoteChannel);
     renderRemoteChannel();
+    renderPrereleases();
     renderAutoUpdate();
   } catch (e) {
     input.placeholder = '';
@@ -253,8 +259,11 @@ async function setRemote() {
     const saved = await resp.json();
     savedRemote = remoteSpec(saved);
     savedChannel = saved.channel;
+    savedPrereleases = saved.prereleases;
+    savedPrereleasesError = saved.prereleases_error || null;
     input.value = savedRemote;
     renderRemoteChannel();
+    renderPrereleases();
     renderAutoUpdate();
     msg.textContent = 'Remote saved.';
     msg.className = 'msg';
@@ -272,6 +281,52 @@ async function setRemote() {
     msg.className = 'msg msg--error';
     msg.hidden = false;
     btn.disabled = false;
+  }
+}
+
+// Release candidates are only walked on the tags channel, so the option is hidden on a branch or pin.
+function renderPrereleases() {
+  if (savedChannel === null) return;
+  document.getElementById('prereleases-field').hidden = savedChannel !== 'tags';
+  document.getElementById('prereleases-enabled').checked = savedPrereleases;
+  document.getElementById('prereleases-enabled').indeterminate = Boolean(savedPrereleasesError);
+  const msg = document.getElementById('prereleases-msg');
+  msg.hidden = !savedPrereleasesError;
+  if (savedPrereleasesError) {
+    msg.textContent = savedPrereleasesError + ' Choose whether to receive candidates to repair this setting.';
+    msg.className = 'msg msg--error';
+  }
+}
+
+async function savePrereleases() {
+  const box = document.getElementById('prereleases-enabled');
+  const msg = document.getElementById('prereleases-msg');
+  box.disabled = true;
+  msg.hidden = true;
+  try {
+    const resp = await fetch('/api/settings/set-prereleases', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: box.checked}),
+    });
+    if (!resp.ok) {
+      const err = await resp.json();
+      throw new Error(responseErrorMessage(err, 'failed to save'));
+    }
+    const saved = await resp.json();
+    savedPrereleases = saved.prereleases;
+    savedPrereleasesError = saved.prereleases_error || null;
+    renderPrereleases();
+    // Only refresh the status: like automatic updates, this changes what an update installs, not when it runs.
+    await checkForUpdates();
+  } catch (e) {
+    box.checked = savedPrereleases;
+    box.indeterminate = Boolean(savedPrereleasesError);
+    msg.textContent = e.message;
+    msg.className = 'msg msg--error';
+    msg.hidden = false;
+  } finally {
+    box.disabled = false;
   }
 }
 
