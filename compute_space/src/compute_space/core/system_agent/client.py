@@ -12,6 +12,7 @@ import cattrs
 import openhost_system_agent.updater.progress as agent_progress
 from compute_space.core.logging import logger
 from compute_space.core.util import async_wrap
+from openhost_system_agent.detach import APPLY_UNIT
 from openhost_system_agent.protocol import DiffResult
 from openhost_system_agent.protocol import FetchResult
 from openhost_system_agent.protocol import MigrationStatus
@@ -121,6 +122,8 @@ def system_agent_show_diff() -> DiffResult:
 
 # Serializes update launches from the Settings button and the auto-update schedule.
 apply_lock = asyncio.Lock()
+_apply_tasks: set[asyncio.Task[None]] = set()
+_APPLY_POLL_SECONDS = 2.0
 
 # The agent's refusal when a walk is already running. Its log belongs to that walk,
 # so don't terminate it here.
@@ -143,15 +146,74 @@ class ApplyLaunch(StrEnum):
 
 
 async def system_agent_apply() -> ApplyLaunch:
-    """Hand the update to the detached apply unit, which stops openhost next. The caller must hold ``apply_lock``.
+    """Hand the update to the detached apply unit. The caller must hold ``apply_lock``.
 
-    The lock stays held only when this started the walk. Otherwise it is released so a retry can run, and on FAILED
-    the failure is also recorded in the progress log and the update token cleared.
+    An independent task owns the lock through launch and completion: cancelling the
+    caller must not release it while the threaded handoff or detached walk continues.
     """
+    launched: asyncio.Future[ApplyLaunch] = asyncio.get_running_loop().create_future()
+    task = asyncio.create_task(_launch_and_monitor_apply(launched), name="monitor-update-apply")
+    _apply_tasks.add(task)
+    task.add_done_callback(_apply_tasks.discard)
+    return await asyncio.shield(launched)
+
+
+@async_wrap
+def _apply_finished() -> bool:
+    # An inactive unit alone can be the gap before the detached walk starts.
+    # start_apply resets the log before handing off, so only a terminal log AND
+    # an inactive unit prove this walk finished. A failed preflight may be so
+    # fast that we never observe the unit running.
+    return not _apply_is_running() and agent_progress.is_terminal(agent_progress.read_entries())
+
+
+def _apply_is_running() -> bool:
+    # The agent's launch-time helper treats unavailable status as inactive (the
+    # unit-name collision is its backstop). Unlocking needs confirmed inactivity.
+    result = subprocess.run(
+        ["systemctl", "show", "--property=ActiveState", "--value", APPLY_UNIT],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    state = result.stdout.strip()
+    if result.returncode != 0 or state not in (
+        "active",
+        "activating",
+        "deactivating",
+        "reloading",
+        "inactive",
+        "failed",
+    ):
+        raise SystemAgentError(f"Could not determine detached apply state: {result.stderr or state}")
+    return state not in ("inactive", "failed")
+
+
+async def _launch_and_monitor_apply(launched: asyncio.Future[ApplyLaunch]) -> None:
+    try:
+        launch = await _launch_apply()
+        launched.set_result(launch)
+        if launch == ApplyLaunch.STARTED:
+            while True:
+                try:
+                    if await _apply_finished():
+                        break
+                except Exception:
+                    logger.exception("failed to check detached apply completion; retrying")
+                await asyncio.sleep(_APPLY_POLL_SECONDS)
+    except Exception as e:
+        if not launched.done():
+            launched.set_exception(e)
+        else:
+            logger.exception("detached apply monitor failed")
+    finally:
+        apply_lock.release()
+
+
+async def _launch_apply() -> ApplyLaunch:
     try:
         await _start_apply()
     except Exception as e:
-        apply_lock.release()
         if _ALREADY_RUNNING in str(e):
             # Started outside this process (e.g. from the CLI). Don't hold the lock for it: if it fails before
             # stopping openhost, nothing would ever release it.

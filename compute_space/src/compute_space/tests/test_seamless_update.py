@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -20,6 +22,7 @@ from compute_space.config import provide_config
 from compute_space.config import set_active_config
 from compute_space.core.system_agent import progress as update_progress
 from compute_space.core.system_agent import update_token as seamless_update
+from compute_space.core.system_agent.client import _apply_is_running
 from compute_space.db import provide_db
 from compute_space.db.connection import init_db
 from compute_space.web.app import _template_globals
@@ -38,9 +41,10 @@ async def _drain() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_apply_lock() -> None:
-    """A successful handoff deliberately never releases the lock -- in production
-    the process is stopped moments later. Tests need it released each time."""
+def _fresh_apply_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Successful fake launches remain running unless a test ends the walk.
+    monkeypatch.setattr(client_mod, "_apply_is_running", lambda: True)
+    monkeypatch.setattr(client_mod, "_APPLY_POLL_SECONDS", 0)
     if client_mod.apply_lock.locked():
         client_mod.apply_lock.release()
 
@@ -175,6 +179,192 @@ async def test_apply_status_error_500_releases_lock(
     with pytest.raises(HTTPException) as e:
         await settings_mod.apply_update.fn()
     assert e.value.status_code == 500
+    assert not client_mod.apply_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_detached_preflight_failure_allows_manual_retry(
+    monkeypatch: pytest.MonkeyPatch, token_calls: dict[str, list[str]], progress_env: Path
+) -> None:
+    running = False
+    checked = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def is_running() -> bool:
+        loop.call_soon_threadsafe(checked.set)
+        return running
+
+    async def status() -> MigrationStatus:
+        return _status()
+
+    async def launch() -> None:
+        agent_progress.reset_progress()
+
+    monkeypatch.setattr(settings_mod, "system_agent_status", status)
+    monkeypatch.setattr(client_mod, "_start_apply", launch)
+    monkeypatch.setattr(client_mod, "_apply_is_running", is_running)
+    await _apply_and_launch()
+    await asyncio.wait_for(checked.wait(), 5)
+    await _drain()
+    # A transient inactive state before startup must not allow a second launch.
+    assert client_mod.apply_lock.locked()
+    with pytest.raises(HTTPException) as exc:
+        await settings_mod.apply_update.fn()
+    assert exc.value.status_code == 409
+
+    # Fast preflight failure: the monitor never observed the unit as active.
+    agent_progress.record(agent_progress.Phase.FAILED, "Working tree is dirty")
+    await asyncio.wait_for(asyncio.gather(*client_mod._apply_tasks), 5)
+    assert not client_mod.apply_lock.locked()
+    assert update_progress.read_progress().entries[-1]["message"] == "Working tree is dirty"
+
+    # The previous monitor must not release the next apply's lock.
+    running = True
+    await _apply_and_launch()
+    agent_progress.record(agent_progress.Phase.FAILED, "Second apply failure")
+    await _drain()
+    assert client_mod.apply_lock.locked()
+    running = False
+    await asyncio.wait_for(asyncio.gather(*client_mod._apply_tasks), 5)
+    assert not client_mod.apply_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_apply_monitor_keeps_lock_while_terminal_unit_still_running(
+    monkeypatch: pytest.MonkeyPatch, progress_env: Path
+) -> None:
+    running = True
+    checked = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def is_running() -> bool:
+        loop.call_soon_threadsafe(checked.set)
+        return running
+
+    async def launch() -> None:
+        agent_progress.reset_progress()
+        agent_progress.record(agent_progress.Phase.FAILED, "preflight failed")
+
+    monkeypatch.setattr(client_mod, "_start_apply", launch)
+    monkeypatch.setattr(client_mod, "_apply_is_running", is_running)
+    await client_mod.apply_lock.acquire()
+    assert await client_mod.system_agent_apply() == client_mod.ApplyLaunch.STARTED
+    await asyncio.wait_for(checked.wait(), 5)
+    await _drain()
+    assert client_mod.apply_lock.locked()
+    running = False
+    await asyncio.wait_for(asyncio.gather(*client_mod._apply_tasks), 5)
+    assert not client_mod.apply_lock.locked()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("launch_fails", [False, True])
+async def test_cancelled_apply_caller_does_not_release_threaded_launch(
+    monkeypatch: pytest.MonkeyPatch,
+    token_calls: dict[str, list[str]],
+    progress_env: Path,
+    launch_fails: bool,
+) -> None:
+    entered = asyncio.Event()
+    finish_launch = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def run(*args: str, **kwargs: object) -> str:
+        agent_progress.reset_progress()
+        loop.call_soon_threadsafe(entered.set)
+        assert finish_launch.wait(5)
+        if launch_fails:
+            raise client_mod.SystemAgentError("handoff failed")
+        return ""
+
+    monkeypatch.setattr(client_mod, "_run_system_agent", run)
+    await client_mod.apply_lock.acquire()
+    caller = asyncio.create_task(client_mod.system_agent_apply())
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        caller.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+        assert client_mod.apply_lock.locked()
+    finally:
+        finish_launch.set()
+
+    if not launch_fails:
+        await _drain()
+        assert client_mod.apply_lock.locked()
+        agent_progress.record(agent_progress.Phase.FAILED, "detached preflight failed")
+        monkeypatch.setattr(client_mod, "_apply_is_running", lambda: False)
+    await asyncio.wait_for(asyncio.gather(*client_mod._apply_tasks), 5)
+    assert not client_mod.apply_lock.locked()
+    assert token_calls["clear"] == (["x"] if launch_fails else [])
+
+
+@pytest.mark.asyncio
+async def test_cancelled_caller_after_handoff_leaves_monitor_running(
+    monkeypatch: pytest.MonkeyPatch, progress_env: Path
+) -> None:
+    launch_returning = asyncio.Event()
+
+    async def launch() -> None:
+        agent_progress.reset_progress()
+        launch_returning.set()
+
+    async def caller() -> None:
+        assert await client_mod.system_agent_apply() == client_mod.ApplyLaunch.STARTED
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client_mod, "_start_apply", launch)
+    await client_mod.apply_lock.acquire()
+    request = asyncio.create_task(caller())
+    await asyncio.wait_for(launch_returning.wait(), 5)
+    await _drain()
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert client_mod.apply_lock.locked()
+    agent_progress.record(agent_progress.Phase.FAILED, "preflight failed")
+    monkeypatch.setattr(client_mod, "_apply_is_running", lambda: False)
+    await asyncio.wait_for(asyncio.gather(*client_mod._apply_tasks), 5)
+    assert not client_mod.apply_lock.locked()
+
+
+@pytest.mark.parametrize(("returncode", "state"), [(1, "inactive"), (0, ""), (0, "unknown")])
+def test_apply_state_requires_confirmed_systemd_response(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, state: str
+) -> None:
+    monkeypatch.setattr(
+        client_mod.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args, returncode, stdout=state, stderr="query error"),
+    )
+    with pytest.raises(client_mod.SystemAgentError):
+        _apply_is_running()
+
+
+@pytest.mark.asyncio
+async def test_apply_monitor_retries_unavailable_status_without_unlocking(
+    monkeypatch: pytest.MonkeyPatch, progress_env: Path
+) -> None:
+    checked = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def unavailable() -> bool:
+        loop.call_soon_threadsafe(checked.set)
+        raise subprocess.TimeoutExpired("systemctl", 15)
+
+    async def launch() -> None:
+        agent_progress.reset_progress()
+        agent_progress.record(agent_progress.Phase.FAILED, "preflight failed")
+
+    monkeypatch.setattr(client_mod, "_start_apply", launch)
+    monkeypatch.setattr(client_mod, "_apply_is_running", unavailable)
+    await client_mod.apply_lock.acquire()
+    assert await client_mod.system_agent_apply() == client_mod.ApplyLaunch.STARTED
+    await asyncio.wait_for(checked.wait(), 5)
+    await _drain()
+    assert client_mod.apply_lock.locked()
+    monkeypatch.setattr(client_mod, "_apply_is_running", lambda: False)
+    await asyncio.wait_for(asyncio.gather(*client_mod._apply_tasks), 5)
     assert not client_mod.apply_lock.locked()
 
 

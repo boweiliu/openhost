@@ -70,6 +70,12 @@ There is no way yet to give a named person their own login to your instance or t
 - **Owner account.** Change the username apps see, and your password.
 - **Updates.** Check for and apply new Cloud in a Bottle versions. It pulls the code, runs any host migrations, and restarts, streaming progress while it goes. The remote decides what you update to: a plain URL follows tagged releases, `url#branch` follows a branch, and `url@tag-or-commit` pins a fixed version. When tracking a plain URL (and thus getting tagged releases), the instance can auto-update every day at a time you pick. On that channel you can also opt in to release candidates (tags like `v1.2.0-rc.1`), which arrive before the stable release but may be broken. An update briefly makes the dashboard and apps unavailable.
 
+### Trying release candidates
+
+On the tags channel, **Receive release-candidate updates (unstable)** changes which versions manual and scheduled updates install; checking it does not immediately start an update. Updates apply any newer stable releases first, then jump directly to the newest candidate. Turning the option off while on a candidate keeps that version installed until a newer stable release is available.
+
+Older versions without this option ignore candidate tags. To try a candidate from one of those versions, set the remote to `url@vX.Y.Z-rc.N` and use **Save & update**. Once the candidate is installed, return the remote to the plain URL and enable release-candidate updates to receive subsequent candidates automatically.
+
 ## Backups
 
 See [backups](./backups.md).

@@ -29,6 +29,7 @@ from openhost_system_agent.protocol import FetchResult
 from openhost_system_agent.protocol import MigrationStatus
 from openhost_system_agent.protocol import RemoteInfo
 from openhost_system_agent.protocol import UpdateChannel
+from openhost_system_agent.updater import progress as agent_progress
 
 _NOW = datetime(2026, 10, 9, 4, 2, tzinfo=UTC)
 _AT_4 = time(4, 0)
@@ -111,7 +112,8 @@ def _status(ok: bool = True, reason: str = "") -> MigrationStatus:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_apply_lock() -> None:
+def _fresh_apply_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(client_mod, "_apply_is_running", lambda: True)
     if client_mod.apply_lock.locked():
         client_mod.apply_lock.release()
 
@@ -260,6 +262,29 @@ async def test_runner_releases_lock_when_a_walk_is_already_running(
     await runner_mod.run_auto_update()
     assert _outcome(migrated_db) == AutoUpdateOutcome.ALREADY_RUNNING
     assert not client_mod.apply_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovers_after_detached_manual_preflight_failure(
+    agent: FakeAgent, migrated_db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENHOST_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(client_mod, "_apply_is_running", lambda: False)
+    monkeypatch.setattr(client_mod, "_APPLY_POLL_SECONDS", 0)
+    agent_progress.reset_progress()
+    await client_mod.apply_lock.acquire()
+    assert await client_mod.system_agent_apply() == client_mod.ApplyLaunch.STARTED
+    await runner_mod.run_auto_update()
+    assert _outcome(migrated_db) == AutoUpdateOutcome.ALREADY_RUNNING
+    agent_progress.record(agent_progress.Phase.FAILED, "Working tree is dirty")
+    await asyncio.wait_for(asyncio.gather(*client_mod._apply_tasks), 5)
+    assert not client_mod.apply_lock.locked()
+
+    monkeypatch.setattr(client_mod, "_apply_is_running", lambda: True)
+    await runner_mod.run_auto_update()
+    assert agent.applied == 2
+    assert _outcome(migrated_db) == AutoUpdateOutcome.STARTED
+    assert client_mod.apply_lock.locked()
 
 
 @pytest.mark.asyncio
