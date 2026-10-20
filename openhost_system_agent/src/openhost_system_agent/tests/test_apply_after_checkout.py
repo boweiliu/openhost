@@ -128,6 +128,19 @@ def test_candidates_are_never_stepping_stones(tmp_path: Path) -> None:
     assert aac._newest_candidate(str(repo)) == "v1.1.0-rc.2"
 
 
+def test_invalid_prereleases_setting_stops_walk_until_repaired(tmp_path: Path) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.0.1", "v1.1.0-rc.1"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    _git(local, "config", aac._PRERELEASES_CONFIG, "invalid")
+    with pytest.raises(RuntimeError, match="openhost.prereleases"):
+        aac._next_step(str(local))
+    _set_target(local, "v1.0.1")
+    assert aac._next_step(str(local)) == "v1.0.1"
+    _git(local, "config", "--unset", aac._TARGET_REF_CONFIG)
+    _git(local, "config", aac._PRERELEASES_CONFIG, "true")
+    assert _walk(local) == ["v1.0.1", "v1.1.0-rc.1"]
+
+
 def test_current_tag_prefers_release_sharing_a_candidates_commit(tmp_path: Path) -> None:
     # REGRESSION guard: see the same test in test_update.py.
     repo = _make_repo(tmp_path / "repo", ["v1.0.0", "v1.1.0-rc.1"])

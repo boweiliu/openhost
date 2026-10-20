@@ -172,8 +172,10 @@ def _set_target_ref(repo: git.Repo, ref: str | None) -> None:
 def _get_prereleases_setting(repo: git.Repo) -> bool:
     try:
         value: str = repo.git.config("--get", "--bool", _PRERELEASES_CONFIG)
-    except git.GitCommandError:
-        return False
+    except git.GitCommandError as e:
+        if e.status == 1:  # Unset: candidates are off by default.
+            return False
+        raise RuntimeError("Failed to read openhost.prereleases; set it to true or false.") from e
     return value.strip() == "true"
 
 
@@ -237,6 +239,7 @@ def _next_step(repo: git.Repo) -> str | None:
     if target_sha is not None and repo.head.commit.hexsha == target_sha:
         return None
 
+    prereleases = _get_prereleases_setting(repo) if target is None else False
     base = _current_tag(repo) or _latest_ancestor_tag(repo)
     later = [t for t in _get_sorted_tags(repo) if base is None or _version_key(t) > _version_key(base)]
     if target_sha is not None:
@@ -252,7 +255,7 @@ def _next_step(repo: git.Repo) -> str | None:
 
     # Releases exhausted on the tags channel: an opted-in host jumps straight to the newest candidate. Never through
     # the ones before it, as a release never goes through its candidates either.
-    candidate = _newest_candidate(repo) if _get_prereleases_setting(repo) else None
+    candidate = _newest_candidate(repo) if prereleases else None
     if candidate is not None and (base is None or _version_key(candidate) > _version_key(base)):
         return candidate
     return None
@@ -505,12 +508,7 @@ def set_remote_url(spec: str) -> RemoteInfo:
 
     _set_target_ref(repo, remote.ref)
 
-    return RemoteInfo(
-        url=_strip_credentials(remote.url),
-        ref=remote.ref or _tags_destination(repo) or "HEAD",
-        channel=remote.channel,
-        prereleases=_get_prereleases_setting(repo),
-    )
+    return get_remote_info()
 
 
 def set_prereleases(enabled: bool) -> RemoteInfo:
@@ -543,9 +541,18 @@ def get_remote_info() -> RemoteInfo:
     # On the tags channel, still report the resolved current tag for display; the channel tells the dashboard not to
     # round-trip it back into a pin.
     ref = target or _current_tag(repo) or _latest_ancestor_tag(repo) or repo.head.commit.hexsha[:8]
+    prereleases_error = None
+    try:
+        prereleases = _get_prereleases_setting(repo)
+    except RuntimeError as e:
+        # Keep Settings usable so the owner can overwrite an invalid choice.
+        # Fetch and apply still reject it instead of silently opting out.
+        prereleases = False
+        prereleases_error = str(e)
     return RemoteInfo(
         url=url,
         ref=ref,
         channel=_channel_for_target(repo, target),
-        prereleases=_get_prereleases_setting(repo),
+        prereleases=prereleases,
+        prereleases_error=prereleases_error,
     )

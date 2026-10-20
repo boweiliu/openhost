@@ -123,6 +123,7 @@ let savedRemote = '';
 let savedChannel = null;
 // Whether the owner opted in to release candidates, null until loaded.
 let savedPrereleases = null;
+let savedPrereleasesError = null;
 // The saved auto-update settings, null until loaded.
 let autoUpdate = null;
 
@@ -209,6 +210,7 @@ async function loadRemote() {
     savedRemote = remoteSpec(data);
     savedChannel = data.channel;
     savedPrereleases = data.prereleases;
+    savedPrereleasesError = data.prereleases_error || null;
     input.value = savedRemote;
     input.placeholder = 'https://github.com/user/repo';
     input.disabled = false;
@@ -258,6 +260,7 @@ async function setRemote() {
     savedRemote = remoteSpec(saved);
     savedChannel = saved.channel;
     savedPrereleases = saved.prereleases;
+    savedPrereleasesError = saved.prereleases_error || null;
     input.value = savedRemote;
     renderRemoteChannel();
     renderPrereleases();
@@ -286,6 +289,13 @@ function renderPrereleases() {
   if (savedChannel === null) return;
   document.getElementById('prereleases-field').hidden = savedChannel !== 'tags';
   document.getElementById('prereleases-enabled').checked = savedPrereleases;
+  document.getElementById('prereleases-enabled').indeterminate = Boolean(savedPrereleasesError);
+  const msg = document.getElementById('prereleases-msg');
+  msg.hidden = !savedPrereleasesError;
+  if (savedPrereleasesError) {
+    msg.textContent = savedPrereleasesError + ' Choose whether to receive candidates to repair this setting.';
+    msg.className = 'msg msg--error';
+  }
 }
 
 async function savePrereleases() {
@@ -303,11 +313,15 @@ async function savePrereleases() {
       const err = await resp.json();
       throw new Error(responseErrorMessage(err, 'failed to save'));
     }
-    savedPrereleases = (await resp.json()).prereleases;
+    const saved = await resp.json();
+    savedPrereleases = saved.prereleases;
+    savedPrereleasesError = saved.prereleases_error || null;
+    renderPrereleases();
     // Only refresh the status: like automatic updates, this changes what an update installs, not when it runs.
     await checkForUpdates();
   } catch (e) {
     box.checked = savedPrereleases;
+    box.indeterminate = Boolean(savedPrereleasesError);
     msg.textContent = e.message;
     msg.className = 'msg msg--error';
     msg.hidden = false;

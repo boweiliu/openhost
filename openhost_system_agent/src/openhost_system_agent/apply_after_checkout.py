@@ -125,7 +125,11 @@ def _target_ref(project: str) -> str | None:
 
 def _prereleases(project: str) -> bool:
     result = _git(project, "config", "--get", "--bool", _PRERELEASES_CONFIG)
-    return result.returncode == 0 and result.stdout.strip() == "true"
+    if result.returncode == 1:  # Unset: candidates are off by default.
+        return False
+    if result.returncode != 0:
+        raise RuntimeError("Failed to read openhost.prereleases; set it to true or false.")
+    return result.stdout.strip() == "true"
 
 
 def _resolve_ref_sha(project: str, ref: str) -> str | None:
@@ -173,6 +177,7 @@ def _next_step(project: str) -> str | None:
     if target_sha is not None and _git(project, "rev-parse", "HEAD").stdout.strip() == target_sha:
         return None
 
+    prereleases = _prereleases(project) if target is None else False
     base = _current_tag(project) or _latest_ancestor_tag(project)
     later = [t for t in _get_sorted_tags(project) if base is None or _version_key(t) > _version_key(base)]
     if target_sha is not None:
@@ -187,7 +192,7 @@ def _next_step(project: str) -> str | None:
         return target
 
     # Releases exhausted on the tags channel: an opted-in host jumps straight to the newest candidate.
-    candidate = _newest_candidate(project) if _prereleases(project) else None
+    candidate = _newest_candidate(project) if prereleases else None
     if candidate is not None and (base is None or _version_key(candidate) > _version_key(base)):
         return candidate
     return None

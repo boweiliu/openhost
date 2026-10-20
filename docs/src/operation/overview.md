@@ -74,7 +74,7 @@ There is no way yet to give a named person their own login to your instance or t
 
 On the tags channel, **Receive release-candidate updates (unstable)** changes which versions manual and scheduled updates install; checking it does not immediately start an update. Updates apply any newer stable releases first, then jump directly to the newest candidate. Turning the option off while on a candidate keeps that version installed until a newer stable release is available.
 
-Older versions without this option ignore candidate tags. To try a candidate from one of those versions, set the remote to `url@vX.Y.Z-rc.N` and use **Save & update**. Once the candidate is installed, return the remote to the plain URL and enable release-candidate updates to receive subsequent candidates automatically.
+Older versions without this option ignore candidate tags. To try a candidate from one of those versions, set the remote to `url@vX.Y.Z-rc.N` and use **Save & update**. If the older Settings page has a separate **Save remote** button, save the remote and then choose **Update & restart**. Once the candidate is installed, return the remote to the plain URL and enable release-candidate updates to receive subsequent candidates automatically.
 
 ## Backups
 

@@ -119,6 +119,36 @@ def test_candidates_are_never_stepping_stones(tmp_path: Path) -> None:
     assert update_mod._newest_candidate(repo) == "v1.1.0-rc.2"
 
 
+def test_invalid_prereleases_setting_is_not_silent_optout(tmp_path: Path) -> None:
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0", "v1.0.1", "v1.1.0-rc.1"])
+    _git(repo_dir, "checkout", "v1.0.0")
+    repo = git.Repo(repo_dir)
+    _git(repo_dir, "config", update_mod._PRERELEASES_CONFIG, "invalid")
+    with pytest.raises(RuntimeError, match="openhost.prereleases"):
+        update_mod._tags_destination(repo)
+    with pytest.raises(RuntimeError, match="openhost.prereleases"):
+        update_mod._next_step(repo)
+    _git(repo_dir, "config", update_mod._PRERELEASES_CONFIG, "true")
+    assert update_mod._tags_destination(repo) == "v1.1.0-rc.1"
+
+
+def test_invalid_prereleases_remains_repairable_and_does_not_block_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.0.1", "v1.1.0-rc.1"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+    _git(tmp_path / "local", "config", update_mod._PRERELEASES_CONFIG, "invalid")
+    info = update_mod.get_remote_info()
+    assert info.channel == UpdateChannel.TAGS and info.url
+    assert info.prereleases_error and "openhost.prereleases" in info.prereleases_error
+    pinned = update_mod.set_remote_url(f"file://{remote}@v1.0.1")
+    assert pinned.channel == UpdateChannel.PINNED and pinned.prereleases_error
+    assert update_mod._next_step(local) == "v1.0.1"
+    repaired = update_mod.set_prereleases(True)
+    assert repaired.prereleases is True and repaired.prereleases_error is None
+
+
 def test_current_tag_prefers_release_sharing_a_candidates_commit(tmp_path: Path) -> None:
     # REGRESSION guard: git describe may name the candidate, and the walk would then "step" onto the release's
     # identical commit forever.

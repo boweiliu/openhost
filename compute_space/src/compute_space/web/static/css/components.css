@@ -1168,6 +1168,7 @@ input[type="radio"] {
 }
 
 input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate,
 input[type="radio"]:checked {
   background: var(--color-accent);
   border-color: #6fbdf0;
@@ -1177,6 +1178,13 @@ input[type="checkbox"]:checked::before {
   content: "";
   width: 6px;
   height: 6px;
+  background: var(--color-text);
+}
+
+input[type="checkbox"]:indeterminate::before {
+  content: "";
+  width: 6px;
+  height: 2px;
   background: var(--color-text);
 }
 

@@ -41,6 +41,7 @@ class RemoteInfo:
     channel: UpdateChannel
     # Whether the owner opted in to release candidates. Saved regardless of channel, but only TAGS acts on it.
     prereleases: bool = False
+    prereleases_error: str | None = None
 
 
 @attr.s(auto_attribs=True, frozen=True)
