@@ -37,10 +37,8 @@
 [[git]]
 name = "bottled-minio"
 url = "https://github.com/cloud-in-a-bottle/bottled-minio"
-ref = "dee5caea097c56fbfc8820846111b0a25c84c2ce"
-# The tested release-binary fix is on bottled-minio PR #6, ahead of main.
-# After it merges, track main again and pin its resulting merge commit.
-tracks = "andrew/minio-release-binaries"
+ref = "4871b30b88f4281603899f22c21c6d616cb84ce4"
+tracks = "main"
 used_by = ["tests/test_e2e.py"]
 
 [[git]]
