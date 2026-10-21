@@ -159,10 +159,16 @@ def verify_owner_auth(connection: AnyConnection) -> None:
 
     returns if authed; raises NotAuthorizedException if not authenticated.
     """
-    accessor = authenticate(connection, db=get_db())
+    db = get_db()
+    accessor = authenticate(connection, db=db)
 
     if isinstance(accessor, AuthenticatedUser):
         if not is_safe_for_cookie_auth(connection):
+            # API credentials should work even when a browser also sends its
+            # session cookie on a cross-origin request, such as an extension upload.
+            if token := _get_bearer_token_if_set(connection):
+                if validate_api_token(token, db) is not None:
+                    return
             raise NotAuthorizedException(detail="cookie authentication is only valid for safe-origin requests")
         return
     if isinstance(accessor, AuthenticatedAPIKey):
