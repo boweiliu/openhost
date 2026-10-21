@@ -17,6 +17,7 @@ import git
 import pytest
 
 import openhost_system_agent.update as update_mod
+from openhost_system_agent.protocol import UpdateChannel
 from openhost_system_agent.updater import paths as updater_paths
 from openhost_system_agent.updater import progress as updater_progress
 
@@ -103,6 +104,63 @@ def test_version_key_orders_release_tags() -> None:
     assert vk("v1.2.0") < vk("v1.10.0")  # numeric, not lexicographic
 
 
+def test_version_key_orders_candidates_before_release() -> None:
+    vk = update_mod._version_key
+    assert vk("v1.0.0") < vk("v1.1.0-rc.1") < vk("v1.1.0-rc.2") < vk("v1.1.0-rc.10") < vk("v1.1.0") < vk("v1.1.1-rc.1")
+
+
+def test_candidates_are_never_stepping_stones(tmp_path: Path) -> None:
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0-rc.1", "v1.0.0", "v1.1.0-rc.1", "v1.1.0-rc.2"])
+    _git(repo_dir, "tag", "v1.1.0-beta")  # not a candidate: ignored
+    _git(repo_dir, "tag", "v1.1.0-rc3")  # undotted: not a candidate either
+    repo = git.Repo(repo_dir)
+
+    assert update_mod._get_sorted_tags(repo) == ["v1.0.0"]
+    assert update_mod._newest_candidate(repo) == "v1.1.0-rc.2"
+
+
+def test_invalid_prereleases_setting_is_not_silent_optout(tmp_path: Path) -> None:
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0", "v1.0.1", "v1.1.0-rc.1"])
+    _git(repo_dir, "checkout", "v1.0.0")
+    repo = git.Repo(repo_dir)
+    _git(repo_dir, "config", update_mod._PRERELEASES_CONFIG, "invalid")
+    with pytest.raises(RuntimeError, match="openhost.prereleases"):
+        update_mod._tags_destination(repo)
+    with pytest.raises(RuntimeError, match="openhost.prereleases"):
+        update_mod._next_step(repo)
+    _git(repo_dir, "config", update_mod._PRERELEASES_CONFIG, "true")
+    assert update_mod._tags_destination(repo) == "v1.1.0-rc.1"
+
+
+def test_invalid_prereleases_remains_repairable_and_does_not_block_pins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.0.1", "v1.1.0-rc.1"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+    _git(tmp_path / "local", "config", update_mod._PRERELEASES_CONFIG, "invalid")
+    info = update_mod.get_remote_info()
+    assert info.channel == UpdateChannel.TAGS and info.url
+    assert info.prereleases_error and "openhost.prereleases" in info.prereleases_error
+    pinned = update_mod.set_remote_url(f"file://{remote}@v1.0.1")
+    assert pinned.channel == UpdateChannel.PINNED and pinned.prereleases_error
+    assert update_mod._next_step(local) == "v1.0.1"
+    repaired = update_mod.set_prereleases(True)
+    assert repaired.prereleases is True and repaired.prereleases_error is None
+
+
+def test_current_tag_prefers_release_sharing_a_candidates_commit(tmp_path: Path) -> None:
+    # REGRESSION guard: git describe may name the candidate, and the walk would then "step" onto the release's
+    # identical commit forever.
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0", "v1.1.0-rc.1"])
+    _git(repo_dir, "tag", "v1.1.0")  # released as-is, on the candidate's commit
+    repo = git.Repo(repo_dir)
+    repo.git.config(update_mod._PRERELEASES_CONFIG, "true")
+
+    assert update_mod._current_tag(repo) == "v1.1.0"
+    assert update_mod._next_step(repo) is None
+
+
 def test_get_sorted_tags_filters_non_release_and_sorts(tmp_path: Path) -> None:
     repo_dir = _make_repo(tmp_path / "repo", ["v2.0.0", "v1.10.0", "v1.2.0"])
     _git(repo_dir, "tag", "v1.0.0-rc1")  # pre-release: ignored
@@ -125,6 +183,33 @@ def test_current_and_ancestor_tag(tmp_path: Path) -> None:
     assert update_mod._latest_ancestor_tag(repo) == "v1.1.0"
 
 
+def test_ancestor_tag_skips_nearer_non_release_tag(tmp_path: Path) -> None:
+    # REGRESSION: git describe returned the nearer rc tag, which was then rejected, so the base was None and the walk
+    # restarted from the oldest tag (v0.1.0, which has no apply_after_checkout.py, stranding the host there).
+    repo_dir = _make_repo(tmp_path / "repo", ["v0.1.0", "v0.2.0"])
+    _commit(repo_dir, "rc")
+    _git(repo_dir, "tag", "v0.3.0-rc1")
+    _commit(repo_dir, "past the rc")
+    repo = git.Repo(repo_dir)
+
+    assert update_mod._latest_ancestor_tag(repo) == "v0.2.0"
+    assert update_mod._next_step(repo) is None
+
+
+def test_ancestor_tag_is_highest_release_not_nearest(tmp_path: Path) -> None:
+    # A merge can bring in a higher release than the nearest tag by distance.
+    repo_dir = _make_repo(tmp_path / "repo", ["v1.0.0"])
+    _git(repo_dir, "checkout", "-b", "release")
+    _commit_and_tag(repo_dir, "v1.1.0")
+    _git(repo_dir, "checkout", "main")
+    for i in range(3):
+        _commit(repo_dir, f"main {i}")
+    _git(repo_dir, "tag", "v1.0.1-hotfix")
+    _git(repo_dir, "merge", "--no-ff", "-X", "ours", "-m", "merge release", "release")
+
+    assert update_mod._latest_ancestor_tag(git.Repo(repo_dir)) == "v1.1.0"
+
+
 # ── fetch_updates ────────────────────────────────────────────────────
 
 
@@ -144,6 +229,17 @@ def test_fetch_updates_up_to_date_on_latest(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(update_mod, "_repo", lambda: local)
 
     assert update_mod.fetch_updates().state == "UP_TO_DATE"
+
+
+def test_fetch_updates_sees_candidates_only_when_opted_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+
+    assert update_mod.fetch_updates().state == "UP_TO_DATE"
+    update_mod.set_prereleases(True)
+    assert update_mod.fetch_updates().state == "BEHIND_REMOTE"
+    assert update_mod.show_diff().remote_ref == "v1.1.0-rc.1"
 
 
 def test_fetch_updates_dirty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -177,6 +273,53 @@ def test_apply_update_steps_onto_immediate_next_tag(tmp_path: Path, monkeypatch:
     # Stepping-stone walk: we move to v1.1.0, NOT straight to the latest v2.0.0.
     assert update_mod._current_tag(local) == "v1.1.0"
     assert len(calls) == 1  # handed off to the apply walk exactly once
+
+
+def test_apply_update_steps_onto_candidate_when_opted_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    calls = _stub_execv(monkeypatch)
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+    update_mod.set_prereleases(True)
+
+    update_mod.apply_update()
+
+    assert update_mod._current_tag(local) == "v1.1.0-rc.1"
+    assert len(calls) == 1
+
+
+def test_opted_in_walk_takes_releases_then_one_hop_to_newest_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0", "v1.2.0-rc.1", "v1.2.0-rc.2"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+    update_mod.set_prereleases(True)
+
+    hops: list[str] = []
+    while (step := update_mod._next_step(local)) is not None:
+        assert len(hops) < 10, hops
+        hops.append(step)
+        local.git.checkout(step)
+    assert hops == ["v1.1.0", "v1.2.0-rc.2"]
+
+
+def test_candidate_host_is_not_walked_back_to_an_older_lines_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A v1.0.1 fix on the old line is newer than the last release in the candidate's history (v1.0.0), but older
+    # than the candidate itself. Stepping onto it would downgrade, and the candidate hop would bounce back forever.
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    _git(remote, "checkout", "-b", "v1.0.x", "v1.0.0")
+    _commit_and_tag(remote, "v1.0.1")
+    _git(remote, "checkout", "main")
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.1.0-rc.1")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+
+    for opted_in in (True, False):
+        update_mod.set_prereleases(opted_in)
+        assert update_mod._next_step(local) is None
+        assert update_mod.fetch_updates().state == "UP_TO_DATE"
 
 
 def test_apply_update_on_latest_hands_off_without_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -300,9 +443,9 @@ def test_get_remote_info_reports_current_tag(tmp_path: Path, monkeypatch: pytest
 
     assert info.ref == "v1.0.0"
     assert info.url is not None and "remote" in info.url
-    # Unpinned: ref is informational only and must not be flagged as a pin, so
-    # the dashboard won't round-trip it back into a silent pin.
-    assert info.pinned is False
+    # Tags channel: ref is informational only and must not be flagged as a pin,
+    # so the dashboard won't round-trip it back into a silent pin.
+    assert info.channel == UpdateChannel.TAGS
 
 
 # ── Pinned target ref (run from a branch/commit) ─────────────────────
@@ -379,7 +522,7 @@ def test_set_remote_url_pins_and_clears_target(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setattr(update_mod, "_repo", lambda: local)
 
     head_before = local.head.commit.hexsha
-    update_mod.set_remote_url(f"file://{remote}@feature")
+    update_mod.set_remote_url(f"file://{remote}#feature")
     assert update_mod._get_target_ref(local) == "feature"
     # Pinning only records the target — the walk (update apply) does the checkout,
     # so HEAD must not move (moving it would boot new code before migrations run).
@@ -411,12 +554,12 @@ def test_get_remote_info_reports_pinned_target(tmp_path: Path, monkeypatch: pyte
 
     info = update_mod.get_remote_info()
     assert info.ref == "feature"
-    assert info.pinned is True  # actually pinned -> dashboard may reconstruct @feature
+    assert info.channel == UpdateChannel.BRANCH  # dashboard may reconstruct #feature
 
 
 def test_get_remote_info_unpinned_not_flagged_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # REGRESSION: an unpinned instance reports the resolved current tag as ref
-    # (for display) but must set pinned=False. Otherwise the dashboard round-
+    # (for display) but must report the tags channel. Otherwise the dashboard round-
     # trips url@ref into set_remote and silently pins the host to the current
     # tag, freezing it out of future auto-updates.
     remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0"])
@@ -426,20 +569,103 @@ def test_get_remote_info_unpinned_not_flagged_pinned(tmp_path: Path, monkeypatch
     assert update_mod._get_target_ref(local) is None  # unpinned
     info = update_mod.get_remote_info()
     assert info.ref == "v1.1.0"  # still shown for information
-    assert info.pinned is False  # but not a pin
+    assert info.channel == UpdateChannel.TAGS  # but not a pin
 
 
-def test_set_remote_url_reports_pinned_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_set_prereleases_round_trips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0", "v1.1.0-rc.1"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.1.0-rc.1")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+
+    assert update_mod.get_remote_info().prereleases is False
+    info = update_mod.set_prereleases(True)
+    assert info.prereleases is True and info.channel == UpdateChannel.TAGS
+    assert info.ref == "v1.1.0-rc.1"  # the candidate actually running, for display
+    # Kept across a channel change, so it is still set on returning to tags; a pin just doesn't act on it.
+    assert update_mod.set_remote_url(f"file://{remote}@v1.0.0").prereleases is True
+    assert update_mod.set_prereleases(False).prereleases is False
+
+
+def test_set_remote_url_reports_channel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     remote = _make_repo(tmp_path / "remote", ["v1.0.0"])
     _branch(remote, "feature", "f1")
     local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
     monkeypatch.setattr(update_mod, "_repo", lambda: local)
 
-    pinned = update_mod.set_remote_url(f"file://{remote}@feature")
-    assert pinned.pinned is True and pinned.ref == "feature"
+    branch = update_mod.set_remote_url(f"file://{remote}#feature")
+    assert branch.channel == UpdateChannel.BRANCH and branch.ref == "feature"
 
-    unpinned = update_mod.set_remote_url(f"file://{remote}")
-    assert unpinned.pinned is False
+    pinned = update_mod.set_remote_url(f"file://{remote}@v1.0.0")
+    assert pinned.channel == UpdateChannel.PINNED and pinned.ref == "v1.0.0"
+    assert update_mod.get_remote_info().channel == UpdateChannel.PINNED
+
+    tags = update_mod.set_remote_url(f"file://{remote}")
+    assert tags.channel == UpdateChannel.TAGS
+
+
+def test_set_remote_url_pins_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0"])
+    _branch(remote, "feature", "f1")
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+    sha = _git(remote, "rev-parse", "feature")[:12]
+
+    info = update_mod.set_remote_url(f"file://{remote}@{sha}")
+    assert info.channel == UpdateChannel.PINNED
+    assert update_mod._get_target_ref(local) == sha
+
+
+def test_set_remote_url_rejects_branch_after_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # @ means a fixed ref, but a branch target-ref follows its tip, so @branch would silently not be pinned.
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0"])
+    _branch(remote, "feature", "f1")
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+
+    with pytest.raises(RuntimeError, match="is a branch"):
+        update_mod.set_remote_url(f"file://{remote}@feature")
+    assert update_mod._get_target_ref(local) is None
+
+
+def test_set_remote_url_rejects_non_branch_after_hash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    remote = _make_repo(tmp_path / "remote", ["v1.0.0"])
+    local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
+    monkeypatch.setattr(update_mod, "_repo", lambda: local)
+
+    with pytest.raises(RuntimeError, match="was not found"):
+        update_mod.set_remote_url(f"file://{remote}#v1.0.0")
+    assert update_mod._get_target_ref(local) is None
+
+
+@pytest.mark.parametrize(
+    ("spec", "url", "ref", "channel"),
+    [
+        ("github.com/o/r", "https://github.com/o/r", None, UpdateChannel.TAGS),
+        ("https://github.com/o/r#main", "https://github.com/o/r", "main", UpdateChannel.BRANCH),
+        ("https://github.com/o/r@v1.2.3", "https://github.com/o/r", "v1.2.3", UpdateChannel.PINNED),
+        ("ssh://git@github.com/o/r.git@abc123", "ssh://git@github.com/o/r.git", "abc123", UpdateChannel.PINNED),
+        ("ssh://git@github.com/o/r.git", "ssh://git@github.com/o/r.git", None, UpdateChannel.TAGS),
+        ("  https://github.com/o/r#feat/x  ", "https://github.com/o/r", "feat/x", UpdateChannel.BRANCH),
+    ],
+)
+def test_parse_remote(spec: str, url: str, ref: str | None, channel: UpdateChannel) -> None:
+    assert update_mod.parse_remote(spec) == update_mod.ParsedRemote(url=url, ref=ref, channel=channel)
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        "https://github.com/o/r@v1#main",
+        "https://github.com/o/r@",
+        "https://github.com/o/r#",
+        "https://github.com/o/r@a@b",
+        "https://github.com/o/r#a#b",
+        "https://github.com/o/r @v1",
+    ],
+)
+def test_parse_remote_rejects(spec: str) -> None:
+    with pytest.raises(ValueError):
+        update_mod.parse_remote(spec)
 
 
 # ── Extended: _next_step termination + stepping-stone topologies ─────
@@ -752,8 +978,8 @@ def test_set_remote_url_roundtrip_pin_is_idempotent(tmp_path: Path, monkeypatch:
     local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
     monkeypatch.setattr(update_mod, "_repo", lambda: local)
 
-    update_mod.set_remote_url(f"file://{remote}@feature")
-    update_mod.set_remote_url(f"file://{remote}@feature")  # re-pin same ref
+    update_mod.set_remote_url(f"file://{remote}#feature")
+    update_mod.set_remote_url(f"file://{remote}#feature")  # re-pin same ref
     assert update_mod._get_target_ref(local) == "feature"
 
     update_mod.set_remote_url(f"file://{remote}")
@@ -786,7 +1012,7 @@ def test_set_remote_url_bad_re_pin_keeps_prior_working_pin(tmp_path: Path, monke
     local = _clone_at(remote, tmp_path / "local", checkout="v1.0.0")
     monkeypatch.setattr(update_mod, "_repo", lambda: local)
 
-    update_mod.set_remote_url(f"file://{remote}@feature")
+    update_mod.set_remote_url(f"file://{remote}#feature")
     assert update_mod._get_target_ref(local) == "feature"
 
     with pytest.raises(RuntimeError, match="could not be resolved"):

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from enum import StrEnum
+
 import attr
 
 
@@ -21,16 +23,25 @@ class DiffResult:
     remote_ref: str | None
 
 
+class UpdateChannel(StrEnum):
+    # No ref on the remote: follow the latest release tag. The only channel auto-updates run on.
+    TAGS = "tags"
+    # ``url#branch``: follow the branch tip.
+    BRANCH = "branch"
+    # ``url@ref``: a fixed tag or commit, never moves.
+    PINNED = "pinned"
+
+
 @attr.s(auto_attribs=True, frozen=True)
 class RemoteInfo:
     url: str | None
     ref: str
-    # True only when the instance is pinned to a target ref (git config
-    # openhost.target-ref). When False, ``ref`` is the resolved current release
-    # tag shown for information only; the dashboard must NOT reconstruct a
-    # ``url@ref`` pin from it, or re-saving an unpinned remote would silently
-    # freeze the host on the current tag.
-    pinned: bool = False
+    # For TAGS, ``ref`` is the resolved current release tag shown for information only; the dashboard must NOT
+    # reconstruct a ``url@ref`` pin from it, or re-saving the remote would silently freeze the host on that tag.
+    channel: UpdateChannel
+    # Whether the owner opted in to release candidates. Saved regardless of channel, but only TAGS acts on it.
+    prereleases: bool = False
+    prereleases_error: str | None = None
 
 
 @attr.s(auto_attribs=True, frozen=True)
