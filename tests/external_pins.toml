@@ -37,7 +37,7 @@
 [[git]]
 name = "bottled-minio"
 url = "https://github.com/cloud-in-a-bottle/bottled-minio"
-ref = "4871b30b88f4281603899f22c21c6d616cb84ce4"
+ref = "6ab5432ab60c919b524635b838a0e5c56413405e"
 tracks = "main"
 used_by = ["tests/test_e2e.py"]
 
