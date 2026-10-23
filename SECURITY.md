@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report vulnerabilities privately by emailing cloudinabottle@imbue.com.
+Please report vulnerabilities privately, either by emailing cloudinabottle@imbue.com or through GitHub: https://github.com/cloud-in-a-bottle/cloud-in-a-bottle/security/advisories/new
 
 Do not open a public issue for security problems.
 
