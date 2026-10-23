@@ -28,6 +28,9 @@ from compute_space.core.auth.auth import validate_session_token
 from compute_space.core.domains import Domain
 from compute_space.core.domains import host_with_request_port
 from compute_space.db import get_db
+from compute_space.web.auth.confirm_navigation import NavigationConfirmationRequired
+from compute_space.web.auth.confirm_navigation import confirm_navigation_response
+from compute_space.web.helpers.zone import ZONE_SCOPE_KEY
 from compute_space.web.helpers.zone import zone_for_request
 
 AnyConnection = ASGIConnection[Any, Any, Any, Any]
@@ -61,19 +64,34 @@ def get_connection_origin(connection: AnyConnection) -> str | None:
     - it is not set on all same-origin requests though
     - it includes the port if non-default (not 80 or 443).
 
-    we don't use the Referer header, as it's not intended for use in CORS type origin validation.
+    we don't use the Referer header here, as it's not intended for use in CORS type origin validation. it's only a
+    fallback on plain-HTTP domains, see `_is_safe_for_cookie_auth_plain_http`.
 
     note sec-fetch-site is potentially preferred to Origin for some uses.
     """
     raw = connection.headers.get("Origin")
     if raw is None:
         return None
-    parsed = urlparse(raw)
-    host, port = parsed.hostname, parsed.port
+    return _url_host(raw)
+
+
+def _url_host(raw: str) -> str:
+    """``host`` or ``host:port`` of an Origin or Referer value, or a non-matching token if it has no parseable host."""
+    try:
+        parsed = urlparse(raw)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return _OPAQUE_ORIGIN_TOKEN
     if not host:
         # present but opaque/unparseable (e.g. "null"): return a non-matching token, not None.
         return raw.strip().lower() or _OPAQUE_ORIGIN_TOKEN
     return f"{host}:{port}" if port else host
+
+
+def _plain_http_zone(connection: AnyConnection) -> Domain | None:
+    """The non-TLS Domain the request arrived on, if any. Only server-side domain config decides this."""
+    zone = connection.scope.get(ZONE_SCOPE_KEY)
+    return zone if isinstance(zone, Domain) and not zone.tls else None
 
 
 def _is_safe_for_cookie_auth_http(connection: Request[Any, Any, Any]) -> bool:
@@ -89,8 +107,13 @@ def _is_safe_for_cookie_auth_http(connection: Request[Any, Any, Any]) -> bool:
     We want to allow links to be clicked from elsewhere in the instance (dashboard, other apps).
     So we allow `same-site` GET/HEADs if Sec-Fetch-Dest == "document", which is only set on full-page
     navigations.
+
+    Browsers only send Fetch Metadata to secure origins, so plain-HTTP domains (LAN, `.local`) fall back to
+    `_is_safe_for_cookie_auth_plain_http`.
     """
     site = connection.headers.get("Sec-Fetch-Site")
+    if site is None:
+        return _is_safe_for_cookie_auth_plain_http(connection)
     if site in {"same-origin", "none"}:
         return True
     if (
@@ -100,6 +123,42 @@ def _is_safe_for_cookie_auth_http(connection: Request[Any, Any, Any]) -> bool:
     ):
         return True
     return False
+
+
+def _is_safe_for_cookie_auth_plain_http(connection: Request[Any, Any, Any]) -> bool:
+    """Fetch Metadata fallback for plain-HTTP domains: require evidence the request came from this same origin.
+
+    That's the Origin if present (sent on cross-origin requests and same-origin non-GETs; a foreign Origin isn't
+    rescued by a matching Referer), else the Referer. Without `Sec-Fetch-Dest` we can't tell a navigation from an
+    app's `<img>`, `<script>` or `<iframe>` load, so requests with neither are refused, including typed URLs,
+    bookmarks and links from other apps. Those navigations recover via `_needs_navigation_confirmation`.
+    """
+    if _plain_http_zone(connection) is None:
+        return False
+    target = connection.base_url.netloc
+    if (origin := get_connection_origin(connection)) is not None:
+        return origin == target
+    referer = connection.headers.get("Referer")
+    return referer is not None and _url_host(referer) == target
+
+
+def _needs_navigation_confirmation(connection: AnyConnection) -> bool:
+    """Whether a refused owner cookie should get the Continue page (see `confirm_navigation_response`).
+
+    Only for a plain-HTTP GET that looks like a page load, with no Origin, and either no Referer or one from this
+    instance. A foreign site's Referer is refused outright, as Fetch Metadata does for cross-site requests on HTTPS.
+    """
+    zone = _plain_http_zone(connection)
+    if zone is None or connection.scope["type"] != ScopeType.HTTP or connection.scope["method"] != "GET":
+        return False
+    headers = connection.headers
+    if "Sec-Fetch-Site" in headers or "Origin" in headers:
+        return False
+    accept = headers.get("Accept", "")
+    if "text/html" not in accept or "application/json" in accept:
+        return False
+    referer = headers.get("Referer")
+    return referer is None or zone.owns(_url_host(referer))
 
 
 def _is_safe_for_cookie_auth_websocket(connection: AnyConnection) -> bool:
@@ -169,6 +228,8 @@ def verify_owner_auth(connection: AnyConnection) -> None:
             if token := _get_bearer_token_if_set(connection):
                 if validate_api_token(token, db) is not None:
                     return
+            if _needs_navigation_confirmation(connection):
+                raise NavigationConfirmationRequired(detail="confirm this navigation to use cookie authentication")
             raise NotAuthorizedException(detail="cookie authentication is only valid for safe-origin requests")
         return
     if isinstance(accessor, AuthenticatedAPIKey):
@@ -254,13 +315,16 @@ def build_login_url(zone: Domain, netloc: str, path: str, query: str) -> str:
     return f"{proto}://{host_with_request_port(zone.name_no_port, netloc)}/login?next={quote(next_url, safe='')}"
 
 
-def auth_required_response(request: Request[Any, Any, Any]) -> Response[Any]:
+def auth_required_response(request: Request[Any, Any, Any], exc: NotAuthorizedException) -> Response[Any]:
     """Response for an unauthenticated non-API HTTP request to a protected path.
 
     In general you should just raise a NotAuthorizedException and let litestar call this for you.
 
-    GET/HEAD redirect to /login with ?next= set to the requested URL. Other methods get a 401.
+    NavigationConfirmationRequired gets the Continue page. Otherwise GET/HEAD redirect to /login with ?next= set to
+    the requested URL, and other methods get a 401.
     """
+    if isinstance(exc, NavigationConfirmationRequired):
+        return confirm_navigation_response()
     if request.method not in ("GET", "HEAD"):
         return Response(content="Authentication required", status_code=401, media_type=MediaType.TEXT)
     zone = zone_for_request(request)
