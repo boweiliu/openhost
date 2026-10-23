@@ -109,7 +109,7 @@ def _is_safe_for_cookie_auth_http(connection: Request[Any, Any, Any]) -> bool:
     navigations.
 
     Browsers only send Fetch Metadata to secure origins, so plain-HTTP domains (LAN, `.local`) fall back to
-    `_is_safe_for_cookie_auth_plain_http`.
+    `_is_safe_for_cookie_auth_plain_http`, which may raise NavigationConfirmationRequired.
     """
     site = connection.headers.get("Sec-Fetch-Site")
     if site is None:
@@ -130,35 +130,30 @@ def _is_safe_for_cookie_auth_plain_http(connection: Request[Any, Any, Any]) -> b
 
     That's the Origin if present (sent on cross-origin requests and same-origin non-GETs; a foreign Origin isn't
     rescued by a matching Referer), else the Referer. Without `Sec-Fetch-Dest` we can't tell a navigation from an
-    app's `<img>`, `<script>` or `<iframe>` load, so requests with neither are refused, including typed URLs,
-    bookmarks and links from other apps. Those navigations recover via `_needs_navigation_confirmation`.
+    app's `<img>`, `<script>` or `<iframe>` load, so requests with neither are refused.
+
+    A page load with no evidence (typed URL, bookmark, link from another app) raises NavigationConfirmationRequired
+    instead, see `confirm_navigation_response`. A foreign site's Referer is refused outright, as Fetch Metadata does
+    for cross-site requests on HTTPS.
     """
-    if _plain_http_zone(connection) is None:
+    zone = _plain_http_zone(connection)
+    if zone is None:
         return False
     target = connection.base_url.netloc
     if (origin := get_connection_origin(connection)) is not None:
         return origin == target
     referer = connection.headers.get("Referer")
-    return referer is not None and _url_host(referer) == target
-
-
-def _needs_navigation_confirmation(connection: AnyConnection) -> bool:
-    """Whether a refused owner cookie should get the Continue page (see `confirm_navigation_response`).
-
-    Only for a plain-HTTP GET that looks like a page load, with no Origin, and either no Referer or one from this
-    instance. A foreign site's Referer is refused outright, as Fetch Metadata does for cross-site requests on HTTPS.
-    """
-    zone = _plain_http_zone(connection)
-    if zone is None or connection.scope["type"] != ScopeType.HTTP or connection.scope["method"] != "GET":
-        return False
-    headers = connection.headers
-    if "Sec-Fetch-Site" in headers or "Origin" in headers:
-        return False
-    accept = headers.get("Accept", "")
-    if "text/html" not in accept or "application/json" in accept:
-        return False
-    referer = headers.get("Referer")
-    return referer is None or zone.owns(_url_host(referer))
+    if referer is not None and _url_host(referer) == target:
+        return True
+    accept = connection.headers.get("Accept", "")
+    if (
+        connection.scope["method"] == "GET"
+        and "text/html" in accept
+        and "application/json" not in accept
+        and (referer is None or zone.owns(_url_host(referer)))
+    ):
+        raise NavigationConfirmationRequired(detail="confirm this navigation to use cookie authentication")
+    return False
 
 
 def _is_safe_for_cookie_auth_websocket(connection: AnyConnection) -> bool:
@@ -222,14 +217,12 @@ def verify_owner_auth(connection: AnyConnection) -> None:
     accessor = authenticate(connection, db=db)
 
     if isinstance(accessor, AuthenticatedUser):
+        # API credentials should work even when a browser also sends its
+        # session cookie on a cross-origin request, such as an extension upload.
+        if token := _get_bearer_token_if_set(connection):
+            if validate_api_token(token, db) is not None:
+                return
         if not is_safe_for_cookie_auth(connection):
-            # API credentials should work even when a browser also sends its
-            # session cookie on a cross-origin request, such as an extension upload.
-            if token := _get_bearer_token_if_set(connection):
-                if validate_api_token(token, db) is not None:
-                    return
-            if _needs_navigation_confirmation(connection):
-                raise NavigationConfirmationRequired(detail="confirm this navigation to use cookie authentication")
             raise NotAuthorizedException(detail="cookie authentication is only valid for safe-origin requests")
         return
     if isinstance(accessor, AuthenticatedAPIKey):
