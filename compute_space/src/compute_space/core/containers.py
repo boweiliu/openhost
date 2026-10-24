@@ -29,6 +29,8 @@ from typing import NoReturn
 
 import attr
 
+from compute_space.core.app_paths import app_data_dir as _app_data_dir
+from compute_space.core.app_paths import app_temp_data_dir as _app_temp_data_dir
 from compute_space.core.ip import is_bindable
 from compute_space.core.logging import logger
 from compute_space.core.manifest import AppManifest
@@ -276,6 +278,11 @@ def _bind_mount_arg(host_path: str, container_path: str, *, read_only: bool = Fa
     return f"{host_path}:{container_path}:{options}"
 
 
+def app_container_name(app_name: str) -> str:
+    """Name of the podman container an app runs in."""
+    return f"openhost-{app_name}"
+
+
 def run_container(
     app_name: str,
     image_tag: str,
@@ -288,10 +295,10 @@ def run_container(
     port_mappings: list[PortMapping] | None = None,
 ) -> str:
     """Start a detached container for an app.  Returns the container ID."""
-    app_data_dir = os.path.join(data_dir, "app_data", app_name)
-    app_temp_dir = os.path.join(temp_data_dir, "app_temp_data", app_name)
+    app_data_dir = _app_data_dir(data_dir, app_name)
+    app_temp_dir = _app_temp_data_dir(temp_data_dir, app_name)
     app_archive_dir = os.path.join(archive_dir, app_name)
-    container_name = f"openhost-{app_name}"
+    container_name = app_container_name(app_name)
 
     wants_all_app_data = manifest.access_all_app_data
 

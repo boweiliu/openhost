@@ -6,6 +6,8 @@ import shutil
 import stat
 import subprocess
 
+from compute_space.core.app_paths import app_data_dir as _app_data_dir
+from compute_space.core.app_paths import app_temp_data_dir as _app_temp_data_dir
 from compute_space.core.containers import ROUTER_GATEWAY_HOST
 from compute_space.core.containers import ROUTER_LOOPBACK_HOST
 from compute_space.core.logging import logger
@@ -97,8 +99,8 @@ def make_data_dirs_and_env_vars(
     Existing directories and their contents are preserved. Each call returns
     newly assembled environment variables, including a newly generated app token.
     """
-    app_data_dir = os.path.join(data_dir, "app_data", app_name)
-    app_temp_dir = os.path.join(temp_data_dir, "app_temp_data", app_name)
+    app_data_dir = _app_data_dir(data_dir, app_name)
+    app_temp_dir = _app_temp_data_dir(temp_data_dir, app_name)
     app_archive_dir = os.path.join(archive_dir, app_name)
     env_vars = {}
 

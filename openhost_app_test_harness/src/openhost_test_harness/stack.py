@@ -25,6 +25,7 @@ without it, service calls from apps hang.
 
 import contextlib
 import logging
+import os
 import shutil
 import socket
 import sqlite3
@@ -41,8 +42,15 @@ import attr
 import requests
 from playwright.sync_api import Page
 
+from compute_space.config import Config
+from compute_space.core.app_paths import app_data_dir
+from compute_space.core.app_paths import app_temp_data_dir
+from compute_space.core.auth.auth import read_owner_username
 from compute_space.core.auth.permissions_v2 import Grant
+from compute_space.core.containers import app_container_name
+from compute_space.core.domains import primary_domain
 from compute_space.core.manifest import MANIFEST_FILENAMES
+from compute_space.core.manifest import AppManifest
 from compute_space.core.manifest import find_manifest_path
 from compute_space.core.manifest import parse_manifest
 from compute_space.tests.local_stack import LocalStack
@@ -188,6 +196,21 @@ class ServiceConsumer:
         return ServiceCallResult(status=result["service_status"], body=result["service_body"])
 
 
+def _use_plain_archive_dir(config: Config) -> None:
+    """Back the archive tier with a plain directory instead of a JuiceFS mount.  Must run before the router boots.
+
+    On real zones the router mounts JuiceFS (via systemd) at ``config.app_archive_dir`` at boot, and refuses to deploy
+    archive-using apps while that mount is down.  The harness has no JuiceFS, so it puts the zone in the ``disabled``
+    archive state, which skips the mount and passes the health check; apps then get the plain directory bind-mounted
+    where the mount would be.
+    """
+    with contextlib.closing(sqlite3.connect(config.db_path)) as db:
+        updated = db.execute("UPDATE archive_backend SET backend = 'disabled' WHERE id = 1").rowcount
+        db.commit()
+    assert updated == 1, "archive_backend row missing from the router db"
+    os.makedirs(config.app_archive_dir, exist_ok=True)
+
+
 @attr.define
 class OpenhostStack:
     """Build, deploy, and front a Cloud in a Bottle app on a real local router for tests.
@@ -201,6 +224,13 @@ class OpenhostStack:
       app URLs
     - ``stack.app_url`` — direct to the app container, bypassing the router (for tests
       that forge ``X-OpenHost-*`` headers or check unauthenticated behavior)
+    - ``stack.container_name``: the app's podman container (for ``podman exec``)
+    - ``stack.data_dir`` / ``stack.temp_data_dir``: host paths of the app's ``app_data`` /
+      ``app_temp_data`` directories
+    - ``stack.manifest``, ``stack.owner_username``, ``stack.zone_domain``
+
+    The archive tier is a plain directory rather than a JuiceFS mount, so archive-using apps
+    deploy normally but their archive data isn't durable.
     """
 
     app_dir: Path = attr.field(default=None, converter=_resolve_app_dir)
@@ -232,6 +262,7 @@ class OpenhostStack:
             zone_name=self.zone_name,
             default_apps=[],
         )
+        _use_plain_archive_dir(config)
         self._local_stack = LocalStack(config=config)
         self._exit_stack = contextlib.ExitStack()
         try:
@@ -323,7 +354,44 @@ class OpenhostStack:
 
     @property
     def _deployed_app_name(self) -> str:
-        return self.app_name or parse_manifest(str(self.app_dir)).name
+        return self.app_name or self.manifest.name
+
+    # ─── The deployed app and zone ───
+
+    @property
+    def manifest(self) -> AppManifest:
+        """The app under test's parsed ``cloudinabottle.toml``."""
+        return parse_manifest(str(self.app_dir))
+
+    @property
+    def container_name(self) -> str:
+        """The podman container the app under test runs in, eg for ``podman exec``."""
+        return app_container_name(self._deployed_app_name)
+
+    @property
+    def data_dir(self) -> Path:
+        """Host path of the app under test's persistent ``app_data`` directory."""
+        return Path(app_data_dir(self._local_stack.config.persistent_data_dir, self._deployed_app_name))
+
+    @property
+    def temp_data_dir(self) -> Path:
+        """Host path of the app under test's ``app_temp_data`` directory."""
+        return Path(app_temp_data_dir(self._local_stack.config.temporary_data_dir, self._deployed_app_name))
+
+    @property
+    def owner_username(self) -> str:
+        with contextlib.closing(sqlite3.connect(self._local_stack.config.db_path)) as db:
+            db.row_factory = sqlite3.Row
+            username = read_owner_username(db)
+        assert username is not None, "zone owner not provisioned yet"
+        return username
+
+    @property
+    def zone_domain(self) -> str:
+        """The zone's primary domain, as apps see it in ``OPENHOST_ZONE_DOMAIN``."""
+        with contextlib.closing(sqlite3.connect(self._local_stack.config.db_path)) as db:
+            db.row_factory = sqlite3.Row
+            return primary_domain(db).name
 
     def _local_port(self, app_name: str) -> int:
         db = sqlite3.connect(self._local_stack.config.db_path)

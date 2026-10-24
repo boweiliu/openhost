@@ -21,6 +21,7 @@ import requests
 from compute_space.config import Config
 from compute_space.config import DefaultConfig
 from compute_space.core.auth.auth import SESSION_COOKIE_NAME
+from compute_space.core.containers import app_container_name
 from compute_space.core.domains import Domain
 from compute_space.core.domains import primary_domain
 from compute_space.core.domains import seed_domains
@@ -137,7 +138,7 @@ class LocalStack:
         teardown to avoid leaking containers across test runs.
         """
         for app_name in self.deployed_app_names:
-            subprocess.run(["podman", "rm", "-f", f"openhost-{app_name}"], capture_output=True, timeout=60)
+            subprocess.run(["podman", "rm", "-f", app_container_name(app_name)], capture_output=True, timeout=60)
 
 
 def browser_session() -> requests.Session:
