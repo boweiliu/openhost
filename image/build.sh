@@ -21,11 +21,11 @@
 # once you delegate DNS and open ports 53/80/443. Claiming is token-gated in
 # this mode (open claiming is refused on a reachable instance).
 #
-# Pass --managed to bake an image for a hosting platform: no domain and no
-# claim token, with TLS via the cert-api broker. Claiming is always token-gated.
-# The image stays dormant until cloud-init user-data writes its config.toml
-# and first_boot.toml and starts openhost (see
-# docs/internal/building_a_vm_image.md).
+# Pass --no-config-files to leave out config.toml and first_boot.toml (the
+# domain, claim token, and everything else instance-specific), e.g. for a
+# hosting platform that runs one image for many instances. Whatever boots the
+# image (e.g. cloud-init user-data) writes both files and starts openhost,
+# which stays off until then (see docs/internal/building_a_vm_image.md).
 #
 # Usage (run on a Linux host with KVM, or an Apple silicon Mac for arm64):
 #   image/build.sh [options]
@@ -49,9 +49,9 @@
 #                         Default: the build generates and registers one.
 #   --acme-email <email>  Email for the generated ACME account (--public, when
 #                         no --acme-key is given).
-#   --managed             Build a domain-less, token-gated image whose per-instance
-#                         config arrives as cloud-init user-data. Excludes
-#                         --domain, --public, and --claim-token.
+#   --no-config-files     Bake no config.toml or first_boot.toml and leave openhost
+#                         disabled. Excludes the flags that only feed those files:
+#                         --domain, --claim-token, --public, --public-ip, --acme-*.
 #   --claim-token <tok>   Bake in a claim token gating /setup. Default: none —
 #                         claiming is open (claim_token_required=false), since
 #                         the image is private behind NAT. Set this to require a
@@ -104,7 +104,7 @@ CPUS="2"
 BUILD_TIMEOUT="1800"
 MAKE_OVA="true"
 PUBLIC="false"
-MANAGED="false"
+NO_CONFIG_FILES="false"
 DOMAIN_SET="false"
 PUBLIC_IP=""
 ACME_KEY_FILE=""
@@ -137,7 +137,7 @@ while [[ $# -gt 0 ]]; do
         --no-ova)       MAKE_OVA="false"; shift ;;
         --timeout)      BUILD_TIMEOUT="$2"; shift 2 ;;
         --public)       PUBLIC="true"; shift ;;
-        --managed)      MANAGED="true"; shift ;;
+        --no-config-files) NO_CONFIG_FILES="true"; shift ;;
         --public-ip)    PUBLIC_IP="$2"; shift 2 ;;
         --acme-key)     ACME_KEY_FILE="$2"; shift 2 ;;
         --acme-email)   ACME_EMAIL="$2"; shift 2 ;;
@@ -169,10 +169,10 @@ case "$ARCH" in
 esac
 CLOUD_IMG_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-$ARCH.img"
 
-# ---- Validate --managed and --public flags ----
-if [ "$MANAGED" = "true" ]; then
+# ---- Validate --no-config-files and --public flags ----
+if [ "$NO_CONFIG_FILES" = "true" ]; then
     if [ "$PUBLIC" = "true" ] || [ "$DOMAIN_SET" = "true" ] || [ -n "$CLAIM_TOKEN" ]; then
-        echo "Error: --managed takes no --public, --domain, or --claim-token (they arrive per instance)." >&2
+        echo "Error: --no-config-files takes no --public, --domain, or --claim-token (they only feed the config files)." >&2
         exit 1
     fi
     DOMAIN=""
@@ -254,8 +254,8 @@ echo "  Version:      $VERSION"
 echo "  Arch:         $ARCH"
 echo "  Repo/branch:  $REPO_URL @ $BRANCH"
 echo "  provision.sh: $PROVISION_SCRIPT (embedded)"
-if [ "$MANAGED" = "true" ]; then
-    echo "  Mode:         managed (domain and claim token from cloud-init, TLS via cert-api)"
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    echo "  Config:       none (config.toml and first_boot.toml are written at first boot)"
 elif [ "$PUBLIC" = "true" ]; then
     echo "  Domain:       $DOMAIN   (public, TLS via Let's Encrypt)"
     echo "  Public IP:    $PUBLIC_IP"
@@ -298,7 +298,7 @@ fi
 # random, printed, token-gated claim. This becomes provision.sh args in the seed.
 if [ -n "$CLAIM_TOKEN" ]; then
     CLAIM_ARG="--claim-token \"$CLAIM_TOKEN\""
-elif [ "$PUBLIC" = "true" ] || [ "$MANAGED" = "true" ]; then
+elif [ "$PUBLIC" = "true" ] || [ "$NO_CONFIG_FILES" = "true" ]; then
     CLAIM_ARG=""
 else
     CLAIM_ARG="--open-claim"
@@ -306,8 +306,8 @@ fi
 
 # Mode args passed to provision.sh: HTTP-only + LAN bind by default, or TLS with
 # the baked public IP (and optional ACME account key / email) under --public.
-if [ "$MANAGED" = "true" ]; then
-    MODE_ARGS="--managed"
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    MODE_ARGS="--no-config-files"
 elif [ "$PUBLIC" = "true" ]; then
     MODE_ARGS="--public-ip \"$PUBLIC_IP\""
     [ -n "$ACME_KEY_FILE" ] && MODE_ARGS="$MODE_ARGS --acme-key /root/acme_account_key.json"
@@ -521,9 +521,9 @@ echo "Disk:   ships as ${DISK_SIZE} (floor). To install with more, size the VM's
 echo "        virtual disk larger before first boot (or write to a bigger"
 echo "        physical disk) — the root filesystem grows to fill it on boot."
 echo ""
-if [ "$MANAGED" = "true" ]; then
-    echo "Managed image: openhost starts once cloud-init user-data writes its"
-    echo "config.toml and first_boot.toml and enables it. Claiming is token-gated."
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    echo "No config files: openhost starts once whatever boots the image writes"
+    echo "config.toml and first_boot.toml and enables it."
 elif [ "$PUBLIC" = "true" ]; then
     echo "Public image for: $DOMAIN"
     echo "Before it can serve, delegate DNS to $PUBLIC_IP and open ports 53, 80, 443"

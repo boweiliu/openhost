@@ -73,9 +73,9 @@ image/build.sh \
 
 The build does not get a TLS certificate issued - That can only happen once it's running and has DNS pointing at it. Once it boots with the right public ip `--public-ip`, delegate DNS and open ports 53 / 80 / 443 to it (see [Exposing a server with a static IP](../src/setup/static_ip.md) or [Exposing a home server](../src/setup/home_network.md)), and the instance will acquire its wildcard certificate and start serving at `https://mycooldomain.com/`.
 
-### Building a managed image
+### Building an image without config files
 
-A hosting platform runs one image for many instances, so the per-instance settings can't be baked in. Pass `--managed` to build an image with no domain, no claim token, and no `config.toml` or `first_boot.toml`. Claiming is always token-gated, and openhost stays disabled until the instance's cloud-init user-data configures it:
+A hosting platform runs one image for many instances, so nothing instance-specific can be baked in. Pass `--no-config-files` to build an image without `config.toml` or `first_boot.toml`, so with no domain, claim token, or ACME account key. openhost stays disabled until whatever boots the image writes both files and starts it, for example cloud-init user-data:
 
 ```yaml
 #cloud-config
@@ -96,10 +96,10 @@ runcmd:
   - [systemctl, enable, --now, openhost]
 ```
 
-Render both files from the same templates the Ansible playbooks use, so the two paths can't drift. A managed image expects `cert_provider = "cert_api"`: it holds no ACME account key.
+Render both files from the same templates the Ansible playbooks use, so the two paths can't drift. Whoever writes `config.toml` decides how claiming is gated (keep `claim_token_required = true` on anything reachable) and how TLS certs are obtained: the image has no ACME account key, so use `cert_provider = "cert_api"` or supply a key.
 
 ```bash
-image/build.sh --managed --no-ova
+image/build.sh --no-config-files --no-ova
 ```
 
 ## Run it

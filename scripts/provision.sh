@@ -29,7 +29,7 @@ BIND_HOST=""
 CLAIM_TOKEN=""
 SWAP_SIZE_GB=""
 OPEN_CLAIM="false"
-MANAGED="false"
+NO_CONFIG_FILES="false"
 PUBLIC_IP_OVERRIDE=""
 ACME_KEY_SRC=""
 ACME_EMAIL=""
@@ -37,7 +37,7 @@ ACME_EMAIL=""
 usage() {
     echo "Usage: $0 --domain <domain> [--branch <branch>] [--repo <repo-url>] [--local-http-only]"
     echo "          [--bind-host <addr>] [--claim-token <token>] [--swap-size <gb>] [--open-claim]"
-    echo "       $0 --managed [--branch <branch>] [--repo <repo-url>] [--swap-size <gb>]"
+    echo "       $0 --no-config-files [--branch <branch>] [--repo <repo-url>] [--swap-size <gb>]"
     echo ""
     echo "  --domain            Required. Domain name (e.g., myhost.example.com)."
     echo "                      In --local-http-only mode this is only used for app"
@@ -74,10 +74,10 @@ usage() {
     echo "                      instance the token is the only thing stopping a stranger"
     echo "                      from claiming it first. Re-enable via config if you later"
     echo "                      expose the instance on a network."
-    echo "  --managed           Install everything except the per-instance config, and"
-    echo "                      leave openhost disabled: for a hosting platform's image,"
-    echo "                      whose cloud-init user-data writes config.toml and"
-    echo "                      first_boot.toml and then starts openhost. No --domain."
+    echo "  --no-config-files   Install everything except config.toml and first_boot.toml,"
+    echo "                      and leave openhost disabled, for an image that gets both"
+    echo "                      files (e.g. from cloud-init) and starts openhost at first"
+    echo "                      boot. Excludes the flags that only feed those files."
 }
 
 while [[ $# -gt 0 ]]; do
@@ -93,15 +93,17 @@ while [[ $# -gt 0 ]]; do
         --acme-key)         ACME_KEY_SRC="$2"; shift 2 ;;
         --acme-email)       ACME_EMAIL="$2"; shift 2 ;;
         --open-claim)       OPEN_CLAIM="true"; shift ;;
-        --managed)          MANAGED="true"; shift ;;
+        --no-config-files)  NO_CONFIG_FILES="true"; shift ;;
         -h|--help)          usage; exit 0 ;;
         *)                  echo "Unknown option: $1"; usage; exit 1 ;;
     esac
 done
 
-if [ "$MANAGED" = "true" ]; then
-    if [ -n "$DOMAIN" ] || [ -n "$CLAIM_TOKEN" ] || [ "$OPEN_CLAIM" = "true" ] || [ "$LOCAL_HTTP_ONLY" = "true" ]; then
-        echo "Error: --managed takes no --domain, --claim-token, --open-claim, or --local-http-only"
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    if [ -n "$DOMAIN" ] || [ -n "$CLAIM_TOKEN" ] || [ "$OPEN_CLAIM" = "true" ] || [ "$LOCAL_HTTP_ONLY" = "true" ] \
+        || [ -n "$PUBLIC_IP_OVERRIDE" ] || [ -n "$ACME_KEY_SRC" ] || [ -n "$ACME_EMAIL" ]; then
+        echo "Error: --no-config-files takes no flags that only feed the config files"
+        echo "       (--domain, --claim-token, --open-claim, --local-http-only, --public-ip, --acme-*)"
         exit 1
     fi
 elif [ -z "$DOMAIN" ]; then
@@ -164,7 +166,7 @@ chown -R host:host "$OPENHOST_DIR"
 
 # ---- Public IP (explicit override, else auto-detect) ----
 PUBLIC_IP="$PUBLIC_IP_OVERRIDE"
-if [ -z "$PUBLIC_IP" ] && [ "$MANAGED" != "true" ]; then
+if [ -z "$PUBLIC_IP" ] && [ "$NO_CONFIG_FILES" != "true" ]; then
     PUBLIC_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
     if [ -z "$PUBLIC_IP" ] || echo "$PUBLIC_IP" | grep -qE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)'; then
         PUBLIC_IP=$(curl -sf --max-time 5 https://ifconfig.me 2>/dev/null || true)
@@ -191,8 +193,8 @@ fi
 if [ "$OPEN_CLAIM" = "true" ]; then
     EXTRA_VARS+=(-e "claim_token_required=false")
 fi
-if [ "$MANAGED" = "true" ]; then
-    EXTRA_VARS+=(-e "managed=true")
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    EXTRA_VARS+=(-e "no_config_files=true")
 fi
 
 ansible-playbook ansible/local_setup.yml \
@@ -206,7 +208,7 @@ ansible-playbook ansible/local_setup.yml \
     -i "localhost,"
 
 # ---- ACME account key (TLS mode only): install the provided one, else generate ----
-if [ "$LOCAL_HTTP_ONLY" != "true" ] && [ "$MANAGED" != "true" ]; then
+if [ "$LOCAL_HTTP_ONLY" != "true" ] && [ "$NO_CONFIG_FILES" != "true" ]; then
     ACME_KEY_PATH="$OPENHOST_DIR/ansible/secrets/certbot_private_key.json"
     ACME_KEY_DIR="$(dirname "$ACME_KEY_PATH")"
     if [ -n "$ACME_KEY_SRC" ]; then
@@ -232,9 +234,9 @@ fi
 # with skip_service_start=true, which now also skips enabling the unit for boot
 # persistence (so warm-pool prebakes stay fully dormant). This is the point in
 # the bare-metal flow where openhost is meant to come up for good, so enable it.
-if [ "$MANAGED" = "true" ]; then
-    echo "--- Managed image: openhost stays disabled until cloud-init configures it ---"
-    # Owned by host, so the config cloud-init writes into it doesn't leave it root-owned.
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    echo "--- No config files: openhost stays disabled until they are written ---"
+    # Owned by host, so writing the config files later (e.g. by cloud-init, as root) doesn't leave it root-owned.
     su host -c "mkdir -p /home/host/.openhost/local_compute_space"
 else
     echo "--- Starting Cloud in a Bottle ---"
@@ -244,8 +246,8 @@ fi
 echo ""
 echo "=== Cloud in a Bottle provisioning complete ==="
 echo ""
-if [ "$MANAGED" = "true" ]; then
-    echo "  Mode:      managed (config.toml and first_boot.toml come from cloud-init)"
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    echo "  Config:    none (config.toml and first_boot.toml are written at first boot)"
 elif [ "$LOCAL_HTTP_ONLY" = "true" ]; then
     echo "  Mode:      HTTP-only localhost (no TLS/public DNS/Caddy)"
     if [ "$OPEN_CLAIM" = "true" ]; then
