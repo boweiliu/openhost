@@ -67,6 +67,11 @@ router would otherwise clone the repo at HEAD and silently test stale code.
   forge `X-OpenHost-*` headers or check unauthenticated behavior)
 - `stack.url_for(app_name)` — any other deployed app, through the router
 - `stack.router_url` — the router itself (dashboard, owner APIs)
+- `stack.container_name`: your app's podman container, for `podman exec`
+- `stack.data_dir` / `stack.temp_data_dir`: host paths of your app's `app_data` / `app_temp_data` directories (the same directories mounted into the container)
+- `stack.manifest`, `stack.owner_username`, `stack.zone_domain`: the parsed `cloudinabottle.toml`, the zone owner's username, and the zone's domain as your app sees it in `OPENHOST_ZONE_DOMAIN`
+
+The archive tier (`app_archive`) is a plain directory rather than the JuiceFS mount real zones use, so archive-using apps deploy and can read and write their archive directory, but nothing about JuiceFS itself is tested.
 
 ### Testing owner routes in a browser (playwright)
 

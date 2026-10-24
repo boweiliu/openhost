@@ -5,6 +5,7 @@ Run:
 """
 
 import re
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -86,3 +87,20 @@ class TestHarness:
     def test_app_logs(self, stack: OpenhostStack) -> None:
         logs = stack.app_logs()
         assert "Echo provider listening" in logs or "Build complete" in logs
+
+    def test_manifest_and_zone(self, stack: OpenhostStack) -> None:
+        assert stack.manifest.name == "echo-provider"
+        assert stack.manifest.app_archive
+        assert stack.owner_username == "owner"
+        assert stack.url.startswith(f"http://{stack.manifest.name}.{stack.zone_domain.split(':')[0]}")
+
+    def test_data_dirs_and_container_name(self, stack: OpenhostStack) -> None:
+        """The host data dirs are the ones mounted into the container, which also has the archive tier."""
+        script = (
+            'test -d "$OPENHOST_APP_ARCHIVE_DIR"'
+            ' && echo data > "$OPENHOST_APP_DATA_DIR/probe"'
+            ' && echo temp > "$OPENHOST_APP_TEMP_DIR/probe"'
+        )
+        subprocess.run(["podman", "exec", stack.container_name, "sh", "-c", script], check=True, timeout=30)
+        assert (stack.data_dir / "probe").read_text() == "data\n"
+        assert (stack.temp_data_dir / "probe").read_text() == "temp\n"

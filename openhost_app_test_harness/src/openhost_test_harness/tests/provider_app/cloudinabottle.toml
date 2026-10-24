@@ -11,6 +11,12 @@ port = 5000
 [routing]
 health_check = "/health"
 
+# All storage tiers, so the harness self-test covers archive-using apps and the data dir accessors.
+[data]
+app_data = true
+app_temp_data = true
+app_archive = true
+
 [resources]
 memory_mb = 64
 cpu_cores = 0.1
