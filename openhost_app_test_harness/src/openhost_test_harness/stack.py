@@ -43,11 +43,11 @@ import requests
 from playwright.sync_api import Page
 
 from compute_space.config import Config
-from compute_space.core.app_paths import app_data_dir
-from compute_space.core.app_paths import app_temp_data_dir
 from compute_space.core.auth.auth import read_owner_username
 from compute_space.core.auth.permissions_v2 import Grant
 from compute_space.core.containers import app_container_name
+from compute_space.core.containers import app_data_dir
+from compute_space.core.containers import app_temp_data_dir
 from compute_space.core.domains import primary_domain
 from compute_space.core.manifest import MANIFEST_FILENAMES
 from compute_space.core.manifest import AppManifest

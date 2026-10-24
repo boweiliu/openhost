@@ -29,8 +29,6 @@ from typing import NoReturn
 
 import attr
 
-from compute_space.core.app_paths import app_data_dir as _app_data_dir
-from compute_space.core.app_paths import app_temp_data_dir as _app_temp_data_dir
 from compute_space.core.ip import is_bindable
 from compute_space.core.logging import logger
 from compute_space.core.manifest import AppManifest
@@ -278,6 +276,16 @@ def _bind_mount_arg(host_path: str, container_path: str, *, read_only: bool = Fa
     return f"{host_path}:{container_path}:{options}"
 
 
+def app_data_dir(data_dir: str, app_name: str) -> str:
+    """Host path of an app's persistent ``app_data`` directory, under ``Config.persistent_data_dir``."""
+    return os.path.join(data_dir, "app_data", app_name)
+
+
+def app_temp_data_dir(temp_data_dir: str, app_name: str) -> str:
+    """Host path of an app's ``app_temp_data`` directory, under ``Config.temporary_data_dir``."""
+    return os.path.join(temp_data_dir, "app_temp_data", app_name)
+
+
 def app_container_name(app_name: str) -> str:
     """Name of the podman container an app runs in."""
     return f"openhost-{app_name}"
@@ -295,8 +303,8 @@ def run_container(
     port_mappings: list[PortMapping] | None = None,
 ) -> str:
     """Start a detached container for an app.  Returns the container ID."""
-    app_data_dir = _app_data_dir(data_dir, app_name)
-    app_temp_dir = _app_temp_data_dir(temp_data_dir, app_name)
+    host_app_data_dir = app_data_dir(data_dir, app_name)
+    app_temp_dir = app_temp_data_dir(temp_data_dir, app_name)
     app_archive_dir = os.path.join(archive_dir, app_name)
     container_name = app_container_name(app_name)
 
@@ -314,7 +322,7 @@ def run_container(
     container_env = {}
     for key, value in env_vars.items():
         if key.startswith("OPENHOST_SQLITE_"):
-            rel_path = os.path.relpath(value, app_data_dir)
+            rel_path = os.path.relpath(value, host_app_data_dir)
             container_env[key] = os.path.join(c_app_data, rel_path)
         elif key == "OPENHOST_APP_DATA_DIR":
             container_env[key] = c_app_data
@@ -414,7 +422,7 @@ def run_container(
         )
     else:
         if has_app_data:
-            cmd.extend(["-v", _bind_mount_arg(app_data_dir, c_app_data)])
+            cmd.extend(["-v", _bind_mount_arg(host_app_data_dir, c_app_data)])
         if has_app_temp:
             cmd.extend(["-v", _bind_mount_arg(app_temp_dir, c_app_temp)])
 
