@@ -234,6 +234,8 @@ fi
 # the bare-metal flow where openhost is meant to come up for good, so enable it.
 if [ "$MANAGED" = "true" ]; then
     echo "--- Managed image: openhost stays disabled until cloud-init configures it ---"
+    # Owned by host, so the config cloud-init writes into it doesn't leave it root-owned.
+    su host -c "mkdir -p /home/host/.openhost/local_compute_space"
 else
     echo "--- Starting Cloud in a Bottle ---"
     systemctl enable --now openhost
