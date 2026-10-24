@@ -21,12 +21,6 @@
 # once you delegate DNS and open ports 53/80/443. Claiming is token-gated in
 # this mode (open claiming is refused on a reachable instance).
 #
-# Pass --no-config-files to leave out config.toml and first_boot.toml (the
-# domain, claim token, and everything else instance-specific), e.g. for a
-# hosting platform that runs one image for many instances. Whatever boots the
-# image (e.g. cloud-init user-data) writes both files and starts openhost,
-# which stays off until then (see docs/internal/building_a_vm_image.md).
-#
 # Usage (run on a Linux host with KVM, or an Apple silicon Mac for arm64):
 #   image/build.sh [options]
 #
@@ -50,8 +44,10 @@
 #   --acme-email <email>  Email for the generated ACME account (--public, when
 #                         no --acme-key is given).
 #   --no-config-files     Bake no config.toml or first_boot.toml and leave openhost
-#                         disabled. Excludes the flags that only feed those files:
-#                         --domain, --claim-token, --public, --public-ip, --acme-*.
+#                         disabled until they are written at first boot (see
+#                         docs/internal/building_a_vm_image.md). Excludes the flags
+#                         that only feed those files: --domain, --claim-token,
+#                         --public, --public-ip, --acme-*.
 #   --claim-token <tok>   Bake in a claim token gating /setup. Default: none —
 #                         claiming is open (claim_token_required=false), since
 #                         the image is private behind NAT. Set this to require a
