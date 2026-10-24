@@ -73,6 +73,35 @@ image/build.sh \
 
 The build does not get a TLS certificate issued - That can only happen once it's running and has DNS pointing at it. Once it boots with the right public ip `--public-ip`, delegate DNS and open ports 53 / 80 / 443 to it (see [Exposing a server with a static IP](../src/setup/static_ip.md) or [Exposing a home server](../src/setup/home_network.md)), and the instance will acquire its wildcard certificate and start serving at `https://mycooldomain.com/`.
 
+### Building an image without config files
+
+A hosting platform runs one image for many instances, so nothing instance-specific can be baked in. Pass `--no-config-files` to build an image without `config.toml` or `first_boot.toml`, so with no domain, claim token, or ACME account key. openhost stays disabled until whatever boots the image writes both files and starts it, for example cloud-init user-data:
+
+```yaml
+#cloud-config
+write_files:
+  - path: /home/host/.openhost/local_compute_space/config.toml
+    owner: host:host
+    permissions: "0600"
+    defer: true
+    content: |
+      # rendered from ansible/templates/config.toml.j2
+  - path: /home/host/.openhost/local_compute_space/first_boot.toml
+    owner: host:host
+    permissions: "0600"
+    defer: true
+    content: |
+      # rendered from ansible/templates/first_boot.toml.j2: domain, claim token, Imbue credential
+runcmd:
+  - [systemctl, enable, --now, openhost]
+```
+
+Render both files from the same templates the Ansible playbooks use, so the two paths can't drift. Whoever writes `config.toml` decides how claiming is gated (keep `claim_token_required = true` on anything reachable) and how TLS certs are obtained: the image has no ACME account key, so use `cert_provider = "cert_api"` or supply a key.
+
+```bash
+image/build.sh --no-config-files --no-ova
+```
+
 ## Run it
 
 Boot the resulting qcow2 (QEMU / KVM / libvirt) or `.ova` (VirtualBox). An HTTP-only image is reached and claimed exactly like a release image; see [Deploying on a shared home machine](../src/setup/shared_homeserver.md#part-1-download-and-run-the-vm-image). A `--public` image instead needs its networking in place first (delegate DNS, open the ports, as above), then you claim at `https://<domain>`. Either way, the build prints the dashboard URL, the claim mode, and the console login when it finishes.
