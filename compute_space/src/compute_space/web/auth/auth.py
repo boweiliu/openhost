@@ -10,6 +10,7 @@ from litestar import Request
 from litestar import Response
 from litestar import WebSocket
 from litestar.connection import ASGIConnection
+from litestar.datastructures import Headers
 from litestar.enums import MediaType
 from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException
@@ -22,6 +23,7 @@ from compute_space.core.auth.auth import AuthenticatedAPIKey
 from compute_space.core.auth.auth import AuthenticatedAccessor
 from compute_space.core.auth.auth import AuthenticatedApp
 from compute_space.core.auth.auth import AuthenticatedUser
+from compute_space.core.auth.auth import is_openhost_credential
 from compute_space.core.auth.auth import validate_api_token
 from compute_space.core.auth.auth import validate_app_token
 from compute_space.core.auth.auth import validate_session_token
@@ -36,12 +38,29 @@ from compute_space.web.helpers.zone import zone_for_request
 AnyConnection = ASGIConnection[Any, Any, Any, Any]
 
 
+def _get_bearer_tokens(headers: Headers) -> list[str]:
+    """Every non-blank token from ``Authorization: Bearer <token>`` headers, in order."""
+    tokens: list[str] = []
+    for key, value in headers.multi_items():
+        if key.lower() == "authorization" and value.lower().startswith("bearer "):
+            if token := value[7:].strip():
+                tokens.append(token)
+    return tokens
+
+
 def _get_bearer_token_if_set(connection: AnyConnection) -> str | None:
-    if auth_header := connection.headers.get("Authorization", ""):
-        if auth_header.lower().startswith("bearer "):
-            if token := auth_header[7:].strip():
-                return token
-    return None
+    tokens = _get_bearer_tokens(connection.headers)
+    return tokens[0] if tokens else None
+
+
+def carries_openhost_credential(headers: Headers) -> bool:
+    """True iff any ``Authorization: Bearer`` header carries a credential the router itself would accept."""
+    tokens = _get_bearer_tokens(headers)
+    if not tokens:
+        # the common case by far -- don't pay for a DB connection.
+        return False
+    with closing(get_db()) as db:
+        return any(is_openhost_credential(token, db) for token in tokens)
 
 
 # what get_connection_origin returns for a present but hostless Origin, e.g. ``Origin: null``.
