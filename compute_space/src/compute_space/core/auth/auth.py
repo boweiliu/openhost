@@ -148,11 +148,7 @@ def validate_app_token(token: str, db: sqlite3.Connection) -> AuthenticatedApp |
 
 
 def is_openhost_credential(token: str, db: sqlite3.Connection) -> bool:
-    """True iff ``token`` is a credential this router would itself accept as authentication.
-
-    Covers every scheme ``authenticate()`` understands, so the proxy can recognise -- and refuse to
-    forward -- a credential that would let a backend app act as the owner or as another app.
-    """
+    """True iff ``token`` is an API, app, or session token this router would accept."""
     return (
         validate_api_token(token, db) is not None
         or validate_app_token(token, db) is not None

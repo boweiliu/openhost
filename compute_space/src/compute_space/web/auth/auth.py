@@ -33,53 +33,28 @@ from compute_space.web.helpers.zone import zone_for_request
 AnyConnection = ASGIConnection[Any, Any, Any, Any]
 
 
-# The dedicated channel for credentials the router consumes.  It sits in the X-OpenHost-* namespace
-# the proxy already strips by name, so a token sent here can never reach a backend app: not when it
-# is mistyped, not when it is expired, not when it was minted for a different instance.  Plain
-# Authorization is still accepted (see _get_bearer_token_if_set) but is on its way out, because
-# recognising a credential there means matching its *value*, which fails open on any typo.
+# stripped by the proxy along with every other X-OpenHost-* header, so it can never reach an app.
 OPENHOST_AUTHORIZATION_HEADER = "X-OpenHost-Authorization"
 
 
-def bearer_token_from_header(auth_header: str) -> str | None:
-    """The token out of a ``Bearer <token>`` header value; None if blank or another scheme."""
-    if auth_header.lower().startswith("bearer "):
-        if token := auth_header[7:].strip():
-            return token
-    return None
-
-
-def _get_bearer_token_if_set(connection: AnyConnection) -> str | None:
-    """The caller's bearer credential, preferring the dedicated OpenHost header.
-
-    When ``X-OpenHost-Authorization`` is present it is authoritative and ``Authorization`` is not
-    consulted at all, which is the whole point: it leaves ``Authorization`` entirely to the app, so a
-    caller can authenticate to the router and pass the app its own bearer in the same request.  A
-    malformed value in the OpenHost header therefore fails closed rather than silently falling back.
-    """
-    if openhost_header := connection.headers.get(OPENHOST_AUTHORIZATION_HEADER, ""):
-        return bearer_token_from_header(openhost_header)
-    return bearer_token_from_header(connection.headers.get("Authorization", ""))
+def _get_bearer_tokens(headers: Headers, name: str = "Authorization") -> list[str]:
+    """Every non-blank token from ``<name>: Bearer <token>`` headers, in order."""
+    tokens: list[str] = []
+    for key, value in headers.multi_items():
+        if key.lower() == name.lower() and value.lower().startswith("bearer "):
+            if token := value[7:].strip():
+                tokens.append(token)
+    return tokens
 
 
 def carries_openhost_credential(headers: Headers) -> bool:
-    """True iff an ``Authorization`` header carries a credential the router itself would accept.
-
-    The proxy uses this to decide whether to drop ``Authorization`` before forwarding to a backend
-    app: an app handed the owner's API token could replay it against the router's own owner API and
-    take over the whole compute space.  Values we don't recognise are left alone, since apps are free
-    to run their own bearer auth and non-Bearer schemes (AWS SigV4, Basic) must pass through intact.
-    """
-    bearer_tokens: list[str] = []
-    for key, value in headers.multi_items():
-        if key.lower() == "authorization":
-            if (token := bearer_token_from_header(value)) is not None:
-                bearer_tokens.append(token)
-    if not bearer_tokens:
-        # the common case by far -- don't pay for a DB connection on every proxied request.
+    """True iff any ``Authorization: Bearer`` header carries a credential the router itself would accept."""
+    tokens = _get_bearer_tokens(headers)
+    if not tokens:
+        # the common case by far -- don't pay for a DB connection.
         return False
     with closing(get_db()) as db:
-        return any(is_openhost_credential(token, db) for token in bearer_tokens)
+        return any(is_openhost_credential(token, db) for token in tokens)
 
 
 def get_connection_origin(connection: AnyConnection) -> str | None:
@@ -142,8 +117,14 @@ def authenticate(connection: AnyConnection, db: sqlite3.Connection) -> Authentic
         if authenticated_user := validate_session_token(session_token, db):
             return authenticated_user
 
-    # api and app tokens are both set in Authorization: Bearer header
-    if token := _get_bearer_token_if_set(connection):
+    # api and app tokens are bearer tokens in X-OpenHost-Authorization, or the deprecated Authorization.
+    # when the OpenHost header is set we don't fall back, so a malformed one fails closed.
+    if connection.headers.get(OPENHOST_AUTHORIZATION_HEADER):
+        tokens = _get_bearer_tokens(connection.headers, OPENHOST_AUTHORIZATION_HEADER)
+    else:
+        tokens = _get_bearer_tokens(connection.headers)
+    if tokens:
+        token = tokens[0]
         # api token
         if authenticated_api_token := validate_api_token(token, db):
             return authenticated_api_token

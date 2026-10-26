@@ -30,13 +30,11 @@ The router is the sole authority for the `X-OpenHost-*` headers an app receives.
 
 ## Credentials never reach an app
 
-None of those three credentials is ever forwarded to an app. Otherwise an app you merely visited with an API token could replay that token against the dashboard API, and a provider app could replay its consumer's app token. Apps learn who the caller is from `X-OpenHost-Is-Owner` and `X-OpenHost-Consumer-Id` instead of from the credential itself.
+No openhost credential is forwarded to an app, since the app could replay it against the router. Apps identify the caller via `X-OpenHost-Is-Owner` and `X-OpenHost-Consumer-Id` instead.
 
-Send your token in **`X-OpenHost-Authorization: Bearer <token>`**. Because it lives in the `X-OpenHost-*` namespace, it is removed by name, before the router even looks at the value. That holds no matter what the value is: a mistyped token, an expired one, or one minted for a different instance is dropped just the same. It also leaves `Authorization` entirely to the app, so one request can authenticate to the router and carry the app's own bearer token.
+Send your token as `X-OpenHost-Authorization: Bearer <token>`. Like every `X-OpenHost-*` header it is stripped by name, whatever its value, which leaves `Authorization` free for the app's own use. The session cookie is likewise stripped from `Cookie` by name.
 
-Plain `Authorization: Bearer <token>` still works, and the router drops it whenever the value is a credential it would itself accept. That check is by value, so it is weaker: a typo means the router does not recognise the token, does not authenticate you, and forwards the near-miss to the app. On an owner-gated route that is harmless, since the request is redirected to `/login` and never reaches the app, but on a `public_paths` route the app receives it. Prefer the dedicated header; `Authorization` support is deprecated and will be removed once clients have moved over.
-
-The session cookie is stripped from `Cookie` by name, the same way.
+Plain `Authorization: Bearer <token>` is deprecated but still accepted. It is only dropped when the router recognises the token, so a mistyped or expired token is forwarded to the app on `public_paths` routes.
 
 ## Catalog apps
 
