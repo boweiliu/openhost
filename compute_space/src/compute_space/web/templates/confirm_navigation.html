@@ -13,7 +13,8 @@ a { display: inline-block; padding: .7rem 1rem; border: 1px solid; }
 <body>
 <h1>Continue to this page</h1>
 <p>Your browser didn't say where this link came from, so confirm you meant to open it.</p>
-{# An empty href reloads this document's own URL, so no request data is interpolated into the page. #}
-<a href="">Continue</a>
+{# The empty href is a no-script fallback; the browser supplies any fragment in the full URL. #}
+<a id="continue" href="">Continue</a>
+<script>{{ continue_script | safe }}</script>
 </body>
 </html>

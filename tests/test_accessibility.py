@@ -12,12 +12,14 @@ import pytest
 from axe_playwright_python.sync_playwright import Axe
 from playwright.sync_api import Browser
 from playwright.sync_api import Page
+from playwright.sync_api import Route
 from playwright.sync_api import expect
 
 from compute_space.tests.local_stack import LocalStack
 from compute_space.tests.local_stack import complete_setup
 from compute_space.tests.local_stack import make_local_stack_config
 from compute_space.tests.utils import managed_router
+from compute_space.web.auth.confirm_navigation import confirm_navigation_response
 
 WCAG_AA_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22a", "wcag22aa"]
 PUBLIC_PAGES = ["/setup"]
@@ -30,6 +32,39 @@ AUTHENTICATED_PAGES = [
     "/terminal/",
     "/docs/",
 ]
+
+
+@pytest.mark.parametrize("fragment", ["", "#post", "#item%2Fone"])
+def test_continue_click_preserves_deep_link(page: Page, fragment: str) -> None:
+    target = "http://navigation.test/deep/a%2Fb?tag=one&tag=two&next=%2Fprivate"
+    requests: list[str] = []
+    referers: list[str | None] = []
+
+    def respond(route: Route) -> None:
+        requests.append(route.request.url)
+        referers.append(route.request.headers.get("referer"))
+        if len(requests) == 1:
+            response = confirm_navigation_response()
+            route.fulfill(
+                status=response.status_code,
+                headers={**response.headers, "content-type": "text/html"},
+                body=response.content,
+            )
+        else:
+            route.fulfill(content_type="text/html", body="<h1>App is ready</h1>")
+
+    page.route("http://navigation.test/**", respond)
+    response = page.goto(target + fragment)
+    assert response is not None and response.status == 401
+    expect(page.get_by_role("heading", name="Continue to this page")).to_be_visible()
+    # Showing the confirmation must not fetch the protected page automatically.
+    assert requests == [target]
+    assert page.url == target + fragment
+    page.get_by_role("link", name="Continue").click()
+    expect(page.get_by_role("heading", name="App is ready")).to_be_visible()
+    assert page.url == target + fragment
+    assert requests == [target, target]
+    assert referers == [None, target]
 
 
 def _unused_port() -> int:
