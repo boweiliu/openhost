@@ -5,6 +5,7 @@ from enum import StrEnum
 
 import attr
 
+from compute_space.core.app_id import is_valid_app_name
 from compute_space.core.logging import logger
 
 
@@ -24,16 +25,24 @@ class Domain:
     name: str = attr.ib(converter=_lowercase)
     # served over TLS (https)?  Public domains: True; mDNS `.local`: False (plain http).
     tls: bool = False
-    # published via the built-in wildcard mDNS responder (`.local`) rather than public DNS?
-    mdns: bool = False
 
     @property
     def name_no_port(self) -> str:
         return self.name.split(":")[0]
 
     @property
+    def mdns(self) -> bool:
+        """Published over mDNS on the LAN rather than public DNS?  Every `.local` name is, and only those."""
+        return self.name_no_port.endswith(".local")
+
+    @property
     def scheme(self) -> str:
         return "https" if self.tls else "http"
+
+    @property
+    def url(self) -> str:
+        """``scheme://name``, keeping a port baked into the configured name."""
+        return f"{self.scheme}://{self.name}"
 
     def owns(self, host: str) -> bool:
         """True if ``host`` is this domain itself or one of its ``<app>.<domain>`` subdomains.
@@ -45,9 +54,16 @@ class Domain:
         host_no_port = host.split(":")[0].lower()
         return host_no_port == name or host_no_port.endswith("." + name)
 
-    def is_app_subdomain(self, host: str) -> bool:
-        """True if ``host`` is an ``<app>.<domain>`` subdomain of this domain, not the domain itself."""
+    def looks_like_app_subdomain(self, host: str) -> bool:
+        """Check for a subdomain of this domain, without checking whether an app exists."""
         return self.owns(host) and host.split(":")[0].lower() != self.name_no_port
+
+    def app_name_from_hostname(self, host: str) -> str | None:
+        """Extract a valid single app label under this domain, without looking up installed apps."""
+        if not self.looks_like_app_subdomain(host):
+            return None
+        app_name = host.split(":", 1)[0].lower()[: -(len(self.name_no_port) + 1)]
+        return app_name if is_valid_app_name(app_name) else None
 
     @classmethod
     def match(cls, db: sqlite3.Connection, host: str) -> Domain | None:
@@ -96,7 +112,7 @@ class AppsBusyForPrimaryChangeError(RuntimeError):
 PRIMARY_DOMAIN_RESTART_MARKER = "Restarting after primary domain change"
 
 
-_COLS = "name, tls, mdns, is_primary, cert_status, error_message"
+_COLS = "name, tls, is_primary, cert_status, error_message"
 
 
 @attr.s(auto_attribs=True, frozen=True)
@@ -106,20 +122,18 @@ class DomainRecord:
 
     name: str
     tls: bool
-    mdns: bool
     cert_status: DomainCertStatus = DomainCertStatus.NONE
     error_message: str | None = None
     is_primary: bool = False
 
     def to_domain(self) -> Domain:
-        return Domain(name=self.name, tls=self.tls, mdns=self.mdns)
+        return Domain(name=self.name, tls=self.tls)
 
 
 def _row_to_record(row: sqlite3.Row) -> DomainRecord:
     return DomainRecord(
         name=row["name"],
         tls=bool(row["tls"]),
-        mdns=bool(row["mdns"]),
         cert_status=DomainCertStatus(row["cert_status"]),
         error_message=row["error_message"],
         is_primary=bool(row["is_primary"]),
@@ -144,13 +158,12 @@ def upsert_record(db: sqlite3.Connection, record: DomainRecord) -> None:
     """Insert a domain, or replace an existing one's fields (never its primary flag — the primary is
     set only by seeding).  Single atomic statement."""
     db.execute(
-        f"INSERT INTO domains ({_COLS}) VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(name) DO UPDATE SET tls = excluded.tls, mdns = excluded.mdns, "
+        f"INSERT INTO domains ({_COLS}) VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET tls = excluded.tls, "
         "cert_status = excluded.cert_status, error_message = excluded.error_message",
         (
             record.name.lower(),
             int(record.tls),
-            int(record.mdns),
             int(record.is_primary),
             record.cert_status,
             record.error_message,
@@ -265,16 +278,16 @@ def seed_domains(db: sqlite3.Connection, primary: Domain, extras: list[DomainRec
     if db.execute("SELECT 1 FROM domains LIMIT 1").fetchone() is not None:
         return False
     seen: set[str] = {primary.name_no_port}
-    rows: list[tuple[str, int, int, int, str, str | None]] = [
-        (primary.name, int(primary.tls), int(primary.mdns), 1, DomainCertStatus.NONE, None)
+    rows: list[tuple[str, int, int, str, str | None]] = [
+        (primary.name, int(primary.tls), 1, DomainCertStatus.NONE, None)
     ]
     for rec in extras:
         host = rec.name.split(":")[0]
         if host in seen:
             continue
         seen.add(host)
-        rows.append((rec.name, int(rec.tls), int(rec.mdns), 0, rec.cert_status, rec.error_message))
-    db.executemany(f"INSERT INTO domains ({_COLS}) VALUES (?, ?, ?, ?, ?, ?)", rows)
+        rows.append((rec.name, int(rec.tls), 0, rec.cert_status, rec.error_message))
+    db.executemany(f"INSERT INTO domains ({_COLS}) VALUES (?, ?, ?, ?, ?)", rows)
     db.commit()
     logger.info("Seeded {} domain(s) into the DB", len(rows))
     return True

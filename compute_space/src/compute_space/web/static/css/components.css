@@ -822,6 +822,7 @@ table.form-table input[type="password"] {
 
 .field > .hint,
 .field > .msg,
+.field > .notice,
 .field > .field-error {
   margin-top: var(--space-2);
   margin-bottom: 0;
@@ -1167,6 +1168,7 @@ input[type="radio"] {
 }
 
 input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate,
 input[type="radio"]:checked {
   background: var(--color-accent);
   border-color: #6fbdf0;
@@ -1176,6 +1178,13 @@ input[type="checkbox"]:checked::before {
   content: "";
   width: 6px;
   height: 6px;
+  background: var(--color-text);
+}
+
+input[type="checkbox"]:indeterminate::before {
+  content: "";
+  width: 6px;
+  height: 2px;
   background: var(--color-text);
 }
 
@@ -1250,6 +1259,16 @@ select {
 .field > select,
 .field > .field-row {
   max-width: 32rem;
+}
+
+/* Controls that can't be used in the current state; a notice under the row says why. */
+.field-row--disabled {
+  opacity: 0.45;
+}
+
+.field-row--disabled,
+.field-row--disabled * {
+  cursor: not-allowed;
 }
 
 .field--check {

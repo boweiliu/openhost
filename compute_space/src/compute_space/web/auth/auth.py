@@ -11,6 +11,8 @@ from litestar import Response
 from litestar import WebSocket
 from litestar.connection import ASGIConnection
 from litestar.datastructures import Headers
+from litestar.enums import MediaType
+from litestar.enums import ScopeType
 from litestar.exceptions import NotAuthorizedException
 from litestar.handlers.base import BaseRouteHandler
 from litestar.response import Redirect
@@ -28,6 +30,9 @@ from compute_space.core.auth.auth import validate_session_token
 from compute_space.core.domains import Domain
 from compute_space.core.domains import host_with_request_port
 from compute_space.db import get_db
+from compute_space.web.auth.confirm_navigation import NavigationConfirmationRequired
+from compute_space.web.auth.confirm_navigation import confirm_navigation_response
+from compute_space.web.helpers.zone import ZONE_SCOPE_KEY
 from compute_space.web.helpers.zone import zone_for_request
 
 AnyConnection = ASGIConnection[Any, Any, Any, Any]
@@ -47,6 +52,15 @@ def _get_bearer_tokens(headers: Headers, name: str = "Authorization") -> list[st
     return tokens
 
 
+def _get_bearer_token_if_set(connection: AnyConnection) -> str | None:
+    # when the OpenHost header is set we don't fall back, so a malformed one fails closed.
+    if connection.headers.get(OPENHOST_AUTHORIZATION_HEADER):
+        tokens = _get_bearer_tokens(connection.headers, OPENHOST_AUTHORIZATION_HEADER)
+    else:
+        tokens = _get_bearer_tokens(connection.headers)
+    return tokens[0] if tokens else None
+
+
 def carries_openhost_credential(headers: Headers) -> bool:
     """True iff any ``Authorization: Bearer`` header carries a credential the router itself would accept."""
     tokens = _get_bearer_tokens(headers)
@@ -55,6 +69,10 @@ def carries_openhost_credential(headers: Headers) -> bool:
         return False
     with closing(get_db()) as db:
         return any(is_openhost_credential(token, db) for token in tokens)
+
+
+# what get_connection_origin returns for a present but hostless Origin, e.g. ``Origin: null``.
+_OPAQUE_ORIGIN_TOKEN = "null"
 
 
 def get_connection_origin(connection: AnyConnection) -> str | None:
@@ -73,37 +91,143 @@ def get_connection_origin(connection: AnyConnection) -> str | None:
     - it is not set on all same-origin requests though
     - it includes the port if non-default (not 80 or 443).
 
-    we don't use the Referer header, as it's not intended for use in CORS type origin validation.
+    we don't use the Referer header here, as it's not intended for use in CORS type origin validation. it's only a
+    fallback on plain-HTTP domains, see `_is_safe_for_cookie_auth_plain_http`.
+
+    note sec-fetch-site is potentially preferred to Origin for some uses.
     """
     raw = connection.headers.get("Origin")
     if raw is None:
         return None
-    parsed = urlparse(raw)
-    host, port = parsed.hostname, parsed.port
+    return _url_host(raw)
+
+
+def _url_host(raw: str) -> str:
+    """``host`` or ``host:port`` of an Origin or Referer value, or a non-matching token if it has no parseable host."""
+    try:
+        parsed = urlparse(raw)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return _OPAQUE_ORIGIN_TOKEN
     if not host:
         # present but opaque/unparseable (e.g. "null"): return a non-matching token, not None.
-        return raw.strip().lower() or "null"
+        return raw.strip().lower() or _OPAQUE_ORIGIN_TOKEN
     return f"{host}:{port}" if port else host
 
 
-def verify_same_origin(connection: AnyConnection) -> None:
-    """Reject cross-origin requests to unauthenticated state-changing endpoints (e.g. /logout).
+def _http_origin(raw: str, *, referer: bool = False) -> tuple[str, str, int] | None:
+    """Parse an HTTP origin, allowing a full URL only for Referer evidence."""
+    if any(char.isspace() or ord(char) < 32 or char == "\\" for char in raw):
+        return None
+    try:
+        parsed = urlparse(raw)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username is not None:
+        return None
+    if not referer and any(char in raw.partition("://")[2] for char in "/?#"):
+        return None
+    return parsed.scheme, host, port if port is not None else (80 if parsed.scheme == "http" else 443)
 
-    The ``Origin`` header is set by browsers on all cross-origin requests (including from subdomains
-    and from sandboxed/opaque contexts, which send ``Origin: null``) and cannot be forged by js. So
-    if an Origin header is present at all, it must match the target host; otherwise the request is
-    cross-site and is rejected. This stops a hostile page (including a sandboxed iframe sending
-    ``Origin: null``) from cross-site POSTing to endpoints like /logout, which has no owner-auth
-    guard of its own (it must work for any session state).
 
-    A genuinely same-origin top-level form post either omits Origin or sends the matching host, so
-    legitimate logout still works.
+def _plain_http_zone(connection: AnyConnection) -> Domain | None:
+    """The non-TLS Domain the request arrived on, if any. Only server-side domain config decides this."""
+    zone = connection.scope.get(ZONE_SCOPE_KEY)
+    return zone if isinstance(zone, Domain) and not zone.tls else None
 
-    raises NotAuthorizedException on a cross-origin request.
+
+def _is_safe_for_cookie_auth_http(connection: Request[Any, Any, Any]) -> bool:
+    """HTTP path for `is_safe_for_cookie_auth`.
+
+    Just using `Origin` is insufficient; Origin isn't set on some valid same-origin requests.
+    Instead we use Sec-Fetch-Site:
+    - `same-origin` (exact same host, ie same-app)
+    - `same-site` (another app)
+    - `cross-site` (another site)
+    - `none` (typing URL in address bar, using bookmark, reloading the page.)
+
+    We want to allow links to be clicked from elsewhere in the instance (dashboard, other apps).
+    So we allow `same-site` GET/HEADs if Sec-Fetch-Dest == "document", which is only set on full-page
+    navigations.
+
+    Browsers only send Fetch Metadata to secure origins, so plain-HTTP domains (LAN, `.local`) fall back to
+    `_is_safe_for_cookie_auth_plain_http`, which may raise NavigationConfirmationRequired.
     """
-    origin = get_connection_origin(connection)
-    if origin is not None and origin != connection.base_url.netloc:
-        raise NotAuthorizedException(detail="cross-origin request not allowed")
+    site = connection.headers.get("Sec-Fetch-Site")
+    if site is None:
+        return _is_safe_for_cookie_auth_plain_http(connection)
+    if site in {"same-origin", "none"}:
+        return True
+    if (
+        site == "same-site"
+        and connection.scope["method"] in ("GET", "HEAD")
+        and connection.headers.get("Sec-Fetch-Dest") == "document"
+    ):
+        return True
+    return False
+
+
+def _is_safe_for_cookie_auth_plain_http(connection: Request[Any, Any, Any]) -> bool:
+    """Fetch Metadata fallback for plain-HTTP domains: require evidence the request came from this same origin.
+
+    That's the Origin if present (sent on cross-origin requests and same-origin non-GETs; a foreign Origin isn't
+    rescued by a matching Referer), else the Referer. Without `Sec-Fetch-Dest` we can't tell a navigation from an
+    app's `<img>`, `<script>` or `<iframe>` load, so requests with neither are refused.
+
+    A page load with no evidence (typed URL, bookmark, link from another app) raises NavigationConfirmationRequired
+    instead, see `confirm_navigation_response`. A foreign site's Referer is refused outright, as Fetch Metadata does
+    for cross-site requests on HTTPS.
+    """
+    zone = _plain_http_zone(connection)
+    if zone is None:
+        return False
+    target = _http_origin(f"http://{connection.base_url.netloc}")
+    if target is None:
+        return False
+    if (origin := connection.headers.get("Origin")) is not None:
+        return _http_origin(origin) == target
+    referer = connection.headers.get("Referer")
+    referer_origin = _http_origin(referer, referer=True) if referer is not None else None
+    if referer_origin == target:
+        return True
+    accept = connection.headers.get("Accept", "")
+    if (
+        connection.scope["method"] == "GET"
+        and "text/html" in accept
+        and "application/json" not in accept
+        and (referer is None or (referer_origin is not None and zone.owns(referer_origin[1])))
+    ):
+        raise NavigationConfirmationRequired(detail="confirm this navigation to use cookie authentication")
+    return False
+
+
+def _is_safe_for_cookie_auth_websocket(connection: AnyConnection) -> bool:
+    """Websocket-path for `is_safe_for_cookie_auth`
+
+    Browsers always send a concrete Origin, so we just check it directly.
+    """
+    return get_connection_origin(connection) == connection.base_url.netloc
+
+
+def is_safe_for_cookie_auth(connection: AnyConnection) -> bool:
+    """Whether the request is safe to allow cookie auth on.
+
+    A malicious app could make a request from the owner's browser to another app on their instance,
+    and by default their browser would send the user's instance auth cookies with this request,
+    because both the origin and target are on the same site.
+
+    We want to prevent such cross-app requests in general, with some narrow exceptions:
+    - a full-page navigation/redirect is allowed - one app show a link to eg approve a permission in another app,
+    and the user should be able to click this.
+    """
+    if connection.scope["type"] == ScopeType.WEBSOCKET:
+        return _is_safe_for_cookie_auth_websocket(connection)
+    if connection.scope["type"] == ScopeType.HTTP:
+        return _is_safe_for_cookie_auth_http(
+            Request(connection.scope, receive=connection.receive, send=connection.send)
+        )
+    return False
 
 
 def authenticate(connection: AnyConnection, db: sqlite3.Connection) -> AuthenticatedAccessor | None:
@@ -118,13 +242,7 @@ def authenticate(connection: AnyConnection, db: sqlite3.Connection) -> Authentic
             return authenticated_user
 
     # api and app tokens are bearer tokens in X-OpenHost-Authorization, or the deprecated Authorization.
-    # when the OpenHost header is set we don't fall back, so a malformed one fails closed.
-    if connection.headers.get(OPENHOST_AUTHORIZATION_HEADER):
-        tokens = _get_bearer_tokens(connection.headers, OPENHOST_AUTHORIZATION_HEADER)
-    else:
-        tokens = _get_bearer_tokens(connection.headers)
-    if tokens:
-        token = tokens[0]
+    if token := _get_bearer_token_if_set(connection):
         # api token
         if authenticated_api_token := validate_api_token(token, db):
             return authenticated_api_token
@@ -141,18 +259,24 @@ def verify_owner_auth(connection: AnyConnection) -> None:
 
     returns if authed; raises NotAuthorizedException if not authenticated.
     """
-    accessor = authenticate(connection, db=get_db())
-    origin = get_connection_origin(connection)
+    db = get_db()
+    accessor = authenticate(connection, db=db)
 
     if isinstance(accessor, AuthenticatedUser):
-        if origin is not None and origin != connection.base_url.netloc:
-            # if origin is set (it is set on all browser cross-origin requests and cannot be forged by js),
-            # it must match the target URL. either router-to-router or same-app-origin is fine.
-            # in theory router->app is also fine but idk if this happens in practice.
-            # we never allow cross-origin requests with user auth, even from other subdomains, as these could be forged by untrusted app js.
-            raise NotAuthorizedException(detail="user authentication only valid for router-origin requests")
-        # origin is not set on normal same-origin GETs, for example, so we allow these.
-        return
+        confirmation = None
+        try:
+            if is_safe_for_cookie_auth(connection):
+                return
+        except NavigationConfirmationRequired as exc:
+            confirmation = exc
+        # API credentials should work even when a browser also sends its
+        # session cookie on a cross-origin request, such as an extension upload.
+        if token := _get_bearer_token_if_set(connection):
+            if validate_api_token(token, db) is not None:
+                return
+        if confirmation is not None:
+            raise confirmation
+        raise NotAuthorizedException(detail="cookie authentication is only valid for safe-origin requests")
     if isinstance(accessor, AuthenticatedAPIKey):
         # API key requests won't come from untrusted JS, so can be trusted regardless of origin.
         return
@@ -215,12 +339,6 @@ def require_owner_or_app_auth(connection: AnyConnection, _route_handler: BaseRou
     verify_app_auth(connection)
 
 
-def require_same_origin(connection: AnyConnection, _route_handler: BaseRouteHandler) -> None:
-    """Adapt verify_same_origin to be used as a route guard (for unauthenticated state-changing
-    endpoints like /logout that still need cross-origin/CSRF protection)."""
-    verify_same_origin(connection)
-
-
 def build_login_url(zone: Domain, netloc: str, path: str, query: str) -> str:
     """Build an absolute ``/login?next=<original>`` URL on ``zone`` — the domain the
     request arrived on.
@@ -242,11 +360,17 @@ def build_login_url(zone: Domain, netloc: str, path: str, query: str) -> str:
     return f"{proto}://{host_with_request_port(zone.name_no_port, netloc)}/login?next={quote(next_url, safe='')}"
 
 
-def login_required_redirect(request: Request[Any, Any, Any]) -> Response[Any]:
-    """Return a 302 redirecting the user to the login page, with ?next= set to the originally requested URL.
+def auth_required_response(request: Request[Any, Any, Any], exc: NotAuthorizedException) -> Response[Any]:
+    """Response for an unauthenticated non-API HTTP request to a protected path.
 
-    This should only be called for non-API HTTP requests.
     In general you should just raise a NotAuthorizedException and let litestar call this for you.
+
+    NavigationConfirmationRequired gets the Continue page. Otherwise GET/HEAD redirect to /login with ?next= set to
+    the requested URL, and other methods get a 401.
     """
+    if isinstance(exc, NavigationConfirmationRequired):
+        return confirm_navigation_response()
+    if request.method not in ("GET", "HEAD"):
+        return Response(content="Authentication required", status_code=401, media_type=MediaType.TEXT)
     zone = zone_for_request(request)
     return Redirect(path=build_login_url(zone, request.url.netloc, request.url.path, request.url.query))

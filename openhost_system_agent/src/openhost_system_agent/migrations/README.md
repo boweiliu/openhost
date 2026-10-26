@@ -19,6 +19,10 @@ The **destination** is normally the latest release tag. A host can instead be pi
 (the **target ref**) — see "Pinning to a target ref" below. When pinned, the release tags are still walked as
 stepping stones (only those the target contains), and the pinned ref is the final hop.
 
+On the tags channel, owners can opt in to release candidates (`vX.Y.Z-rc.N`). The walk applies newer stable releases
+first, then takes one final hop to the newest candidate if it is newer. Candidates are never stepping stones, even
+between two candidates. Opting out while on a candidate holds that version until a newer stable release arrives.
+
 Running each step under the checked-out tag's code is the critical design choice. This means:
 
 - Each tag's code controls its own migration + install sequence.
@@ -54,7 +58,8 @@ class Migration{NNNN}{Name}(SystemMigration):
 ## The stepping-stone guarantee
 
 The tag walk ensures a host that has been offline for a long time can catch up safely by walking through each
-intermediate tag rather than jumping straight to the latest.
+intermediate stable release rather than jumping straight to the latest. Release candidates are skipped: every
+candidate and the eventual stable release must also support being reached directly from the previous stable release.
 
 ### The algorithm
 
@@ -71,13 +76,15 @@ final step. It is careful to (a) treat "already on the target commit" as termina
 step through tags that are ancestors of the pinned target. Without both, a target that does not contain the newest tag
 (a branch cut from an older release, or a rollback pin) would oscillate forever between the newest tag and the target.
 
+Because each checked-out release controls the rest of the walk, stable releases published after adding RC support
+must retain that support. A higher-version stable built from older, pre-RC code can stop before the final candidate
+hop. To test through such a release, explicitly pin the candidate, apply it, then return to the tags channel.
+
 ## Pinning to a target ref
 
-By default the destination is the latest release tag. To pin a host to a specific branch or commit, append `@<ref>` to
-the remote URL (e.g. via `update set_remote` or the dashboard): `https://github.com/cloud-in-a-bottle/cloud-in-a-bottle@my-branch`.
-This persists `openhost.target-ref` in git config. Updates then walk the release tags the target contains as stepping
-stones and end on the target's tip instead of the latest tag. Passing a URL with no `@<ref>` clears the pin and
-restores latest-tag behavior.
+By default the destination is the latest release tag. To follow a branch instead, append `#<branch>` to the remote URL (e.g. via `update set-remote` or the dashboard): `https://github.com/cloud-in-a-bottle/cloud-in-a-bottle#my-branch`. To pin a fixed tag or commit, append `@<ref>`: `https://github.com/cloud-in-a-bottle/cloud-in-a-bottle@v1.2.3`. `set-remote` rejects a branch after `@` and a non-branch after `#`, so the two can't be confused.
+
+Both persist `openhost.target-ref` in git config. Updates then walk the release tags the target contains as stepping stones and end on the target instead of the latest tag. Because `origin/<ref>` is resolved first, a branch target follows its tip and a tag or commit stays put; that is also how `get-remote` tells the two apart. Passing a URL with no `#<branch>` or `@<ref>` clears the target and restores latest-tag behavior. Scheduled automatic updates (configured in the dashboard) only run in that latest-tag mode.
 
 Because the pin is persisted, be careful not to round-trip a resolved ref (like the current tag) back into the remote
 URL — doing so would pin the host to that tag and freeze it there.
@@ -86,10 +93,13 @@ URL — doing so would pin the host to that tag and freeze it there.
 
 ### Migrations run before `pixi install`, with a restricted import surface
 
-Migrations run *before* this tag's `pixi install`, so the env still holds the *previous* tag's dependencies. A
+Migrations run *before* this tag's `pixi install`, so the env still holds the *previously installed* ref's dependencies. A
 migration may only use:
 - Python stdlib and `subprocess` (the normal way to do host-level work)
-- Packages already installed in the previous env (attr, loguru, and anything else in the prior lockfile)
+- Packages already installed in the previous env (attr, loguru, and anything else in its lockfile)
+
+For candidate and stable-release migrations, an earlier candidate's lockfile is not a guaranteed previous env: hosts
+may skip every candidate. A dependency introduced only in an earlier candidate cannot be assumed installed.
 
 This is rarely a constraint — migrations change host state (apt, sysctls, systemd, files) via `subprocess`, not the
 project's Python deps. Note that `registry.py` imports every migration module at startup, so a migration module must

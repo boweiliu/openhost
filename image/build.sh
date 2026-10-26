@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# build.sh — Build a bootable OpenHost VM image from the Ubuntu 24.04 cloud image.
+# build.sh: build a bootable Cloud in a Bottle VM image from the Ubuntu 24.04 cloud image.
 #
 # The recipe is deliberately plain: take Ubuntu's official cloud-image qcow2,
 # boot it once under QEMU with a cloud-init seed that runs our existing,
 # tested provision.sh, let it power itself off, then freeze the resulting disk.
 # No Packer, no autoinstall ISO dance — just the exact code path a real deploy
 # uses. Output is a QEMU qcow2 and (optionally) a VirtualBox OVA.
+#
+# Builds an image for the host's arch: amd64, or arm64 (which boots via UEFI
+# and has no OVA).
 #
 # The image comes up out of the box in HTTP-only mode bound to 0.0.0.0, so the
 # dashboard is reachable at http://<vm-ip>:8080 with a default console password.
@@ -18,13 +21,13 @@
 # once you delegate DNS and open ports 53/80/443. Claiming is token-gated in
 # this mode (open claiming is refused on a reachable instance).
 #
-# Usage (run on a Linux host with KVM):
+# Usage (run on a Linux host with KVM, or an Apple silicon Mac for arm64):
 #   image/build.sh [options]
 #
 # Options:
-#   --branch <branch>     Git branch of openhost app code to clone (default: main)
+#   --branch <branch>     Git branch of Cloud in a Bottle app code to clone (default: main)
 #   --repo <url>          Git repo URL to clone app code from
-#                         (default: imbue-openhost/openhost)
+#                         (default: cloud-in-a-bottle/cloud-in-a-bottle)
 #   --provision-script <path>
 #                         provision.sh to embed and run in the build VM
 #                         (default: this repo's scripts/provision.sh). Embedded
@@ -40,12 +43,17 @@
 #                         Default: the build generates and registers one.
 #   --acme-email <email>  Email for the generated ACME account (--public, when
 #                         no --acme-key is given).
+#   --no-config-files     Bake no config.toml or first_boot.toml and leave openhost
+#                         disabled until they are written at first boot (see
+#                         docs/internal/building_a_vm_image.md). Excludes the flags
+#                         that only feed those files: --domain, --claim-token,
+#                         --public, --public-ip, --acme-*.
 #   --claim-token <tok>   Bake in a claim token gating /setup. Default: none —
 #                         claiming is open (claim_token_required=false), since
 #                         the image is private behind NAT. Set this to require a
 #                         token (e.g. for a customized image you distribute).
 #   --password <pw>       Default console password for the `host` user
-#                         (default: openhost)
+#                         (default: cloudinabottle)
 #   --ssh-pubkey <path>   Optional SSH public key file to authorize for `host`
 #                         (SSH is key-only; without this, access is console-only)
 #   --version <v>         Version string used in artifact filenames
@@ -62,21 +70,27 @@
 #   --cpus <n>            Build VM vCPUs (default: 2)
 #   --output-dir <dir>    Where artifacts land (default: image/out)
 #   --no-ova              Skip the VirtualBox OVA; produce only the qcow2
+#                         (always skipped for arm64)
 #   --timeout <sec>       Max seconds to wait for the build boot (default: 1800)
 #   -h, --help            Show this help
 #
-# Requirements: qemu-system-x86_64, qemu-img, cloud-localds (cloud-image-utils)
-# or genisoimage/xorriso, curl, tar. KVM (/dev/kvm) strongly recommended —
-# without it the build boot falls back to slow TCG emulation.
+# Requirements: qemu-system-x86_64 (amd64) or qemu-system-aarch64 plus UEFI
+# firmware from qemu-efi-aarch64 (arm64), qemu-img, cloud-localds
+# (cloud-image-utils) or xorriso/genisoimage/mkisofs, curl, tar, timeout, and
+# KVM (/dev/kvm) or HVF on macOS.
 
 set -euo pipefail
 
 # ---- Defaults ----
+case "$(uname -m)" in
+    aarch64|arm64) ARCH="arm64" ;;
+    *)             ARCH="amd64" ;;
+esac
 BRANCH="main"
-REPO_URL="https://github.com/imbue-openhost/openhost.git"
+REPO_URL="https://github.com/cloud-in-a-bottle/cloud-in-a-bottle.git"
 DOMAIN="lvh.me"
 CLAIM_TOKEN=""   # empty => open claim (no token required); set to bake a token
-HOST_PASSWORD="openhost"
+HOST_PASSWORD="cloudinabottle"
 SSH_PUBKEY_FILE=""
 VERSION=""
 DISK_SIZE="20G"
@@ -86,6 +100,8 @@ CPUS="2"
 BUILD_TIMEOUT="1800"
 MAKE_OVA="true"
 PUBLIC="false"
+NO_CONFIG_FILES="false"
+DOMAIN_SET="false"
 PUBLIC_IP=""
 ACME_KEY_FILE=""
 ACME_EMAIL=""
@@ -94,8 +110,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="$SCRIPT_DIR/out"
 CACHE_DIR="$SCRIPT_DIR/cache"
 PROVISION_SCRIPT="$SCRIPT_DIR/../scripts/provision.sh"
-
-CLOUD_IMG_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
 
 # Print the leading comment block (everything from line 2 up to the first
 # non-comment line), stripped of the leading "# ".
@@ -106,7 +120,7 @@ while [[ $# -gt 0 ]]; do
         --branch)       BRANCH="$2"; shift 2 ;;
         --repo)         REPO_URL="$2"; shift 2 ;;
         --provision-script) PROVISION_SCRIPT="$2"; shift 2 ;;
-        --domain)       DOMAIN="$2"; shift 2 ;;
+        --domain)       DOMAIN="$2"; DOMAIN_SET="true"; shift 2 ;;
         --claim-token)  CLAIM_TOKEN="$2"; shift 2 ;;
         --password)     HOST_PASSWORD="$2"; shift 2 ;;
         --ssh-pubkey)   SSH_PUBKEY_FILE="$2"; shift 2 ;;
@@ -119,6 +133,7 @@ while [[ $# -gt 0 ]]; do
         --no-ova)       MAKE_OVA="false"; shift ;;
         --timeout)      BUILD_TIMEOUT="$2"; shift 2 ;;
         --public)       PUBLIC="true"; shift ;;
+        --no-config-files) NO_CONFIG_FILES="true"; shift ;;
         --public-ip)    PUBLIC_IP="$2"; shift 2 ;;
         --acme-key)     ACME_KEY_FILE="$2"; shift 2 ;;
         --acme-email)   ACME_EMAIL="$2"; shift 2 ;;
@@ -127,7 +142,37 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# ---- Validate --public flags ----
+# ---- Per-arch settings ----
+case "$ARCH" in
+    amd64)
+        QEMU="qemu-system-x86_64"
+        QEMU_MACHINE=()
+        ;;
+    arm64)
+        QEMU="qemu-system-aarch64"
+        # Ubuntu's arm64 cloud image boots only via UEFI, so -bios points at the
+        # edk2 firmware. That is all the build boot needs; the image itself
+        # boots through the removable-media fallback path (EFI/BOOT/BOOTAA64.EFI)
+        # on any UEFI arm64 VM, so no NVRAM state needs to ship with it.
+        # Debian/Ubuntu's qemu-efi-aarch64 puts the firmware here. Elsewhere
+        # (e.g. Homebrew) it's in QEMU's data dir, where -bios finds it by name.
+        UEFI_FW=/usr/share/qemu-efi-aarch64/QEMU_EFI.fd
+        [ -f "$UEFI_FW" ] || UEFI_FW=edk2-aarch64-code.fd
+        QEMU_MACHINE=(-machine virt -bios "$UEFI_FW")
+        # The VirtualBox OVF below describes an x86 machine.
+        MAKE_OVA="false"
+        ;;
+esac
+CLOUD_IMG_URL="https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-$ARCH.img"
+
+# ---- Validate --no-config-files and --public flags ----
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    if [ "$PUBLIC" = "true" ] || [ "$DOMAIN_SET" = "true" ] || [ -n "$CLAIM_TOKEN" ]; then
+        echo "Error: --no-config-files takes no --public, --domain, or --claim-token (they only feed the config files)." >&2
+        exit 1
+    fi
+    DOMAIN=""
+fi
 if [ "$PUBLIC" = "true" ]; then
     if [ -z "$PUBLIC_IP" ]; then
         echo "Error: --public requires --public-ip <ip> (baked in for DNS records)." >&2
@@ -151,11 +196,23 @@ need() {
 
 # ---- Dependency checks ----
 need qemu-img       "Install qemu-utils."
-need qemu-system-x86_64 "Install qemu-system-x86."
+need "$QEMU"         "Install qemu-system-x86 (amd64) or qemu-system-arm (arm64)."
+
 need curl           "Install curl."
 need tar            "Install tar."
+need timeout        "Install coreutils."
 
-# Seed-ISO builder: prefer cloud-localds, fall back to xorriso/genisoimage.
+if [ -w /dev/kvm ]; then
+    KVM_ARGS=(-enable-kvm -cpu host)
+elif [ "$(sysctl -n kern.hv_support 2>/dev/null)" = "1" ]; then
+    # macOS Hypervisor.framework.
+    KVM_ARGS=(-accel hvf -cpu host)
+else
+    echo "Error: no writable /dev/kvm (or HVF on macOS)." >&2
+    exit 1
+fi
+
+# Seed-ISO builder: prefer cloud-localds, fall back to xorriso/genisoimage/mkisofs.
 SEED_TOOL=""
 if command -v cloud-localds >/dev/null 2>&1; then
     SEED_TOOL="cloud-localds"
@@ -163,14 +220,21 @@ elif command -v xorriso >/dev/null 2>&1; then
     SEED_TOOL="xorriso"
 elif command -v genisoimage >/dev/null 2>&1; then
     SEED_TOOL="genisoimage"
+elif command -v mkisofs >/dev/null 2>&1; then
+    SEED_TOOL="mkisofs"
 else
-    echo "Error: need one of cloud-localds (cloud-image-utils), xorriso, or genisoimage." >&2
+    echo "Error: need one of cloud-localds (cloud-image-utils), xorriso, genisoimage, or mkisofs." >&2
     exit 1
 fi
 
 if [ -z "$VERSION" ]; then
     VERSION="$(git -C "$SCRIPT_DIR" describe --tags --always --dirty 2>/dev/null || echo dev)"
 fi
+
+# Every artifact (qcow2, vmdk, ovf, ova) is this stem plus its extension, so the
+# published download names are decided in exactly one place. .github/workflows/
+# release.yml globs `cloud-in-a-bottle-*` to collect them, so keep the two in sync.
+ARTIFACT_BASE="cloud-in-a-bottle-$VERSION-$ARCH"
 
 if [ ! -f "$PROVISION_SCRIPT" ]; then
     echo "Error: provision script not found: $PROVISION_SCRIPT" >&2
@@ -181,11 +245,14 @@ mkdir -p "$OUTPUT_DIR" "$CACHE_DIR"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-echo "=== OpenHost VM image build ==="
+echo "=== Cloud in a Bottle VM image build ==="
 echo "  Version:      $VERSION"
+echo "  Arch:         $ARCH"
 echo "  Repo/branch:  $REPO_URL @ $BRANCH"
 echo "  provision.sh: $PROVISION_SCRIPT (embedded)"
-if [ "$PUBLIC" = "true" ]; then
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    echo "  Config:       none (config.toml and first_boot.toml are written at first boot)"
+elif [ "$PUBLIC" = "true" ]; then
     echo "  Domain:       $DOMAIN   (public, TLS via Let's Encrypt)"
     echo "  Public IP:    $PUBLIC_IP"
     echo "  ACME key:     ${ACME_KEY_FILE:-generated during build}"
@@ -199,7 +266,7 @@ echo "  Output dir:   $OUTPUT_DIR"
 echo ""
 
 # ---- 1. Fetch the Ubuntu cloud base image (cached) ----
-BASE_IMG="$CACHE_DIR/noble-server-cloudimg-amd64.img"
+BASE_IMG="$CACHE_DIR/noble-server-cloudimg-$ARCH.img"
 if [ ! -f "$BASE_IMG" ]; then
     echo "--- Downloading Ubuntu 24.04 cloud image ---"
     curl -fSL "$CLOUD_IMG_URL" -o "$BASE_IMG.tmp"
@@ -227,7 +294,7 @@ fi
 # random, printed, token-gated claim. This becomes provision.sh args in the seed.
 if [ -n "$CLAIM_TOKEN" ]; then
     CLAIM_ARG="--claim-token \"$CLAIM_TOKEN\""
-elif [ "$PUBLIC" = "true" ]; then
+elif [ "$PUBLIC" = "true" ] || [ "$NO_CONFIG_FILES" = "true" ]; then
     CLAIM_ARG=""
 else
     CLAIM_ARG="--open-claim"
@@ -235,7 +302,9 @@ fi
 
 # Mode args passed to provision.sh: HTTP-only + LAN bind by default, or TLS with
 # the baked public IP (and optional ACME account key / email) under --public.
-if [ "$PUBLIC" = "true" ]; then
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    MODE_ARGS="--no-config-files"
+elif [ "$PUBLIC" = "true" ]; then
     MODE_ARGS="--public-ip \"$PUBLIC_IP\""
     [ -n "$ACME_KEY_FILE" ] && MODE_ARGS="$MODE_ARGS --acme-key /root/acme_account_key.json"
     [ -n "$ACME_EMAIL" ]    && MODE_ARGS="$MODE_ARGS --acme-email \"$ACME_EMAIL\""
@@ -246,10 +315,11 @@ fi
 # Embed provision.sh and seal.sh (and, for --public --acme-key, the account key)
 # as single-line base64 blobs. The base64 alphabet is [A-Za-z0-9+/=] — none of
 # which collide with sed's '|' delimiter.
-PROVISION_B64="$(base64 -w0 "$PROVISION_SCRIPT")"
-SEAL_B64="$(base64 -w0 "$SCRIPT_DIR/seal.sh")"
+b64() { base64 < "$1" | tr -d '\n'; }
+PROVISION_B64="$(b64 "$PROVISION_SCRIPT")"
+SEAL_B64="$(b64 "$SCRIPT_DIR/seal.sh")"
 ACME_KEY_B64=""
-[ -n "$ACME_KEY_FILE" ] && ACME_KEY_B64="$(base64 -w0 "$ACME_KEY_FILE")"
+[ -n "$ACME_KEY_FILE" ] && ACME_KEY_B64="$(b64 "$ACME_KEY_FILE")"
 
 USER_DATA="$WORK_DIR/user-data"
 # Use a non-/ delimiter for sed since URLs contain slashes.
@@ -276,8 +346,8 @@ case "$SEED_TOOL" in
         xorriso -as genisoimage -output "$SEED_ISO" -volid cidata -joliet -rock \
             "$USER_DATA" "$SCRIPT_DIR/cloud-init/meta-data"
         ;;
-    genisoimage)
-        genisoimage -output "$SEED_ISO" -volid cidata -joliet -rock \
+    genisoimage|mkisofs)
+        "$SEED_TOOL" -output "$SEED_ISO" -volid cidata -joliet -rock \
             "$USER_DATA" "$SCRIPT_DIR/cloud-init/meta-data"
         ;;
 esac
@@ -290,18 +360,12 @@ CONSOLE_LOG="$OUTPUT_DIR/build-console.log"
 : > "$CONSOLE_LOG"
 echo "  (guest console -> $CONSOLE_LOG)"
 
-KVM_ARGS=()
-if [ -e /dev/kvm ] && [ -w /dev/kvm ]; then
-    KVM_ARGS=(-enable-kvm -cpu host)
-else
-    echo "  (no writable /dev/kvm — falling back to slow TCG emulation)"
-    KVM_ARGS=(-cpu max)
-fi
-
 # -display none -monitor none: no VGA, no monitor on stdio (nothing waits on
-# stdin). The guest's ttyS0 console is captured to CONSOLE_LOG.
+# stdin). The guest serial console (ttyS0, or ttyAMA0 on arm64) is captured
+# to CONSOLE_LOG.
 set +e
-timeout "$BUILD_TIMEOUT" qemu-system-x86_64 \
+timeout "$BUILD_TIMEOUT" "$QEMU" \
+    "${QEMU_MACHINE[@]}" \
     "${KVM_ARGS[@]}" \
     -m "$MEM_MB" \
     -smp "$CPUS" \
@@ -322,9 +386,9 @@ if [ $QEMU_RC -eq 124 ]; then
     exit 1
 fi
 
-if grep -q "OPENHOST_IMAGE_BUILD_SUCCESS" "$CONSOLE_LOG"; then
+if grep -q "BOTTLE_IMAGE_BUILD_SUCCESS" "$CONSOLE_LOG"; then
     echo "  Provisioning succeeded."
-elif grep -q "OPENHOST_IMAGE_BUILD_FAILED" "$CONSOLE_LOG"; then
+elif grep -q "BOTTLE_IMAGE_BUILD_FAILED" "$CONSOLE_LOG"; then
     echo "Error: provisioning reported failure. Last console output:" >&2
     tail -n 60 "$CONSOLE_LOG" >&2 || true
     exit 1
@@ -336,7 +400,7 @@ fi
 
 # ---- 5. Compact the qcow2 (drop freed blocks) ----
 echo "--- Finalizing qcow2 ---"
-QCOW2_OUT="$OUTPUT_DIR/openhost-$VERSION-amd64.qcow2"
+QCOW2_OUT="$OUTPUT_DIR/$ARTIFACT_BASE.qcow2"
 qemu-img convert -O qcow2 -c "$DISK" "$QCOW2_OUT"
 
 echo ""
@@ -347,13 +411,13 @@ if [ "$MAKE_OVA" = "true" ]; then
     echo "--- Building VirtualBox OVA ---"
     OVA_STAGE="$WORK_DIR/ova"
     mkdir -p "$OVA_STAGE"
-    VMDK="$OVA_STAGE/openhost-$VERSION-amd64.vmdk"
+    VMDK="$OVA_STAGE/$ARTIFACT_BASE.vmdk"
     qemu-img convert -O vmdk -o subformat=streamOptimized,adapter_type=lsilogic \
         "$DISK" "$VMDK"
 
     CAPACITY_BYTES="$(qemu-img info --output=json "$DISK" | sed -n 's/.*"virtual-size": *\([0-9]*\).*/\1/p' | head -n1)"
     VMDK_BYTES="$(file_size "$VMDK")"
-    OVF="$OVA_STAGE/openhost-$VERSION-amd64.ovf"
+    OVF="$OVA_STAGE/$ARTIFACT_BASE.ovf"
     VMDK_NAME="$(basename "$VMDK")"
 
     cat > "$OVF" <<OVF_EOF
@@ -377,9 +441,9 @@ if [ "$MAKE_OVA" = "true" ]; then
       <Description>NAT network</Description>
     </Network>
   </NetworkSection>
-  <VirtualSystem ovf:id="openhost-$VERSION">
-    <Info>OpenHost $VERSION</Info>
-    <Name>openhost-$VERSION</Name>
+  <VirtualSystem ovf:id="cloud-in-a-bottle-$VERSION">
+    <Info>Cloud in a Bottle $VERSION</Info>
+    <Name>cloud-in-a-bottle-$VERSION</Name>
     <OperatingSystemSection ovf:id="94">
       <Info>Ubuntu 24.04 (64-bit)</Info>
       <Description>Ubuntu_64</Description>
@@ -440,7 +504,7 @@ if [ "$MAKE_OVA" = "true" ]; then
 </Envelope>
 OVF_EOF
 
-    OVA_OUT="$OUTPUT_DIR/openhost-$VERSION-amd64.ova"
+    OVA_OUT="$OUTPUT_DIR/$ARTIFACT_BASE.ova"
     # OVA spec: the .ovf must be the first entry in the tar, disk(s) after.
     tar -C "$OVA_STAGE" -cf "$OVA_OUT" "$(basename "$OVF")" "$VMDK_NAME"
     echo "  VirtualBox:   $OVA_OUT"
@@ -453,7 +517,10 @@ echo "Disk:   ships as ${DISK_SIZE} (floor). To install with more, size the VM's
 echo "        virtual disk larger before first boot (or write to a bigger"
 echo "        physical disk) — the root filesystem grows to fill it on boot."
 echo ""
-if [ "$PUBLIC" = "true" ]; then
+if [ "$NO_CONFIG_FILES" = "true" ]; then
+    echo "No config files: openhost starts once whatever boots the image writes"
+    echo "config.toml and first_boot.toml and enables it."
+elif [ "$PUBLIC" = "true" ]; then
     echo "Public image for: $DOMAIN"
     echo "Before it can serve, delegate DNS to $PUBLIC_IP and open ports 53, 80, 443"
     echo "to the VM. Then the dashboard comes up at:  https://$DOMAIN"

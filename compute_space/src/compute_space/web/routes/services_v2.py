@@ -5,7 +5,6 @@ Routes:
     OPTIONS /api/services/v2/call/{shortname}/{rest:path} — CORS preflight
     *       /api/services/v2/call/{shortname}/{rest:path} — proxied call
     WS      /api/services/v2/call/{shortname}/{rest:path} — proxied WS call
-    GET     /api/services/v2/oauth_callback              — OAuth callback fan-out
 
 The HTTP call route proxies the response back to the client.  Small responses
 (including 403s) are automatically buffered by ``proxy_http_request``, so we
@@ -19,6 +18,7 @@ CORS:
 """
 
 import json
+import re
 import sqlite3
 from collections.abc import Iterable
 from typing import Any
@@ -29,7 +29,6 @@ from litestar import MediaType
 from litestar import Request
 from litestar import Router
 from litestar import WebSocket
-from litestar import get
 from litestar import route
 from litestar import websocket
 from litestar.datastructures import MutableScopeHeaders
@@ -44,10 +43,8 @@ from litestar.params import FromPath
 from litestar.response import Response
 from litestar.response.base import ASGIResponse
 
-from compute_space.core.apps import find_app_by_name
-from compute_space.core.apps import get_app_from_hostname
+from compute_space.core.domains import Domain
 from compute_space.core.proxy_target import InProcess
-from compute_space.core.proxy_target import LocalPort
 from compute_space.core.proxy_target import ProxyTarget
 from compute_space.core.service_interface.headers import app_consumer_headers
 from compute_space.core.service_interface.headers import approve_grant_url
@@ -61,6 +58,7 @@ from compute_space.web.helpers.proxy import proxy_http_request
 from compute_space.web.helpers.proxy import proxy_websocket_request
 
 _CALL_PATH = "/api/services/v2/call/{shortname:str}/{rest:path}"
+_CORS_ORIGIN_RE = re.compile(r"https?://(?P<hostname>[a-z0-9.-]+)(?::(?P<port>[0-9]{1,5}))?", re.IGNORECASE | re.ASCII)
 _HTTP_METHODS = [
     HttpMethod.GET,
     HttpMethod.POST,
@@ -120,6 +118,21 @@ def _carry_response_headers(headers: MutableScopeHeaders) -> Iterable[tuple[str,
         yield k, v
 
 
+def _cors_origin_hostname(origin: str) -> str | None:
+    """Accept scheme://host[:port] HTTP(S) origins, as browsers send them, with a port in 0–65535.
+
+    Validate the entire field before reflecting it in CORS headers; get_connection_origin
+    only extracts the host and would also accept URLs containing credentials, paths, or queries.
+    """
+    match = _CORS_ORIGIN_RE.fullmatch(origin)
+    if match is None:
+        return None
+    port = match.group("port")
+    if port is not None and int(port) > 65535:
+        return None
+    return match.group("hostname").lower()
+
+
 def _cors_headers(origin: str) -> dict[str, str]:
     return {
         "Access-Control-Allow-Origin": origin,
@@ -143,11 +156,12 @@ async def service_call_cors(
     rest: FromPath[str],
     db: NamedDependency[sqlite3.Connection],
 ) -> Response[str]:
-    """Hande CORS preflight HTTP OPTIONS request, respond with appropriate CORS headers."""
+    """Handle CORS preflights for app-shaped origins without revealing which apps are installed."""
     origin = request.headers.get("Origin", None)
-    # block CORS preflight if Origin is not a known app - no auth headers yet but we can at least verify this,
-    # to help avoid XSRF from external sites.
-    if origin is None or get_app_from_hostname(origin, db) is None:
+    if origin is None or (host := _cors_origin_hostname(origin)) is None:
+        raise PermissionDeniedException(detail="Forbidden")
+    domain = Domain.match(db, host)
+    if domain is None or domain.app_name_from_hostname(host) is None:
         raise PermissionDeniedException(detail="Forbidden")
     return Response(content="", status_code=204, headers=_cors_headers(origin))
 
@@ -277,56 +291,6 @@ async def service_call_ws(
     )
 
 
-@get(
-    "/api/services/v2/oauth_callback",
-    raises=[ClientException, ServiceUnavailableException],
-    responses={
-        502: ResponseSpec(
-            data_container=str, media_type=MediaType.TEXT, description="The OAuth provider app is unavailable."
-        ),
-        504: ResponseSpec(
-            data_container=str, media_type=MediaType.TEXT, description="The OAuth provider app timed out."
-        ),
-    },
-)
-async def oauth_callback_proxy_v2(request: Request[Any, Any, Any]) -> ASGIResponse:
-    """Proxy OAuth provider callbacks to the correct oauth service app.
-
-    OAuth providers (Google, GitHub, etc.) redirect to a fixed callback URL on
-    MY_REDIRECT_DOMAIN after user authorization. This endpoint receives that
-    redirect and forwards it to the oauth app that initiated the flow.
-
-    The oauth app encodes its app name in the OAuth ``state`` parameter as
-    JSON: ``{"app": "<app_name>", "nonce": "<random>"}``. This endpoint parses
-    that to determine which app should receive the callback, then proxies the
-    full request to that app's ``/callback`` handler.
-    """
-    state_raw = request.query_params.get("state", "")
-    if not state_raw:
-        raise ClientException(detail="Missing state parameter", extra={"code": "bad_request"})
-
-    try:
-        state = json.loads(state_raw)
-    except json.JSONDecodeError as e:
-        raise ClientException(detail="Invalid state parameter", extra={"code": "bad_request"}) from e
-
-    app_name = state.get("app")
-    if not app_name or not isinstance(app_name, str):
-        raise ClientException(detail="Missing app in state", extra={"code": "bad_request"})
-
-    app_row = find_app_by_name(app_name)
-    if not app_row:
-        raise ServiceUnavailableException(
-            detail=f"App '{app_name}' not found", extra={"code": "service_not_available"}
-        )
-    if app_row.status != "running":
-        raise ServiceUnavailableException(
-            detail=f"App '{app_name}' is not running", extra={"code": "service_not_available"}
-        )
-
-    return await proxy_http_request(request, target=LocalPort(app_row.local_port), override_path="/callback")
-
-
 # ─── Router ─────────────────────────────────────────────────────────────────
 
 
@@ -336,5 +300,5 @@ services_v2_routes = Router(
     # bug where registering a non-OPTIONS handler first causes an auto-generated
     # OPTIONS handler to be appended, which then silently overwrites any explicit
     # OPTIONS handler via last-writer-wins in route_handler_method_map.
-    route_handlers=[service_call_cors, service_call, service_call_ws, oauth_callback_proxy_v2],
+    route_handlers=[service_call_cors, service_call, service_call_ws],
 )

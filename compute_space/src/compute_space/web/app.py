@@ -34,6 +34,7 @@ from compute_space.core.first_boot import seed_first_boot
 from compute_space.core.git_ops import SOURCE_URL
 from compute_space.core.image_pruner import start_image_pruner
 from compute_space.core.logging import logger
+from compute_space.core.mdns.responder import MdnsResponder
 from compute_space.core.memory_guard import ensure_memory_guard
 from compute_space.core.org_rename import reconcile_app_repo_urls
 from compute_space.core.process_stream import cleanup_all as cleanup_process_streams
@@ -43,13 +44,14 @@ from compute_space.core.storage import start_storage_guard
 from compute_space.core.terminal import cleanup_all as cleanup_terminal
 from compute_space.db import get_db
 from compute_space.db import provide_db
-from compute_space.web.auth.auth import login_required_redirect
+from compute_space.web.auth.auth import auth_required_response
 from compute_space.web.helpers.static import make_static_url
 from compute_space.web.helpers.zone import ZONE_SCOPE_KEY
 from compute_space.web.middleware.subdomain_proxy import SubdomainProxyMiddleware
 from compute_space.web.routes.api.app_definitions import api_app_definitions_routes
 from compute_space.web.routes.api.apps import api_apps_routes
 from compute_space.web.routes.api.archive_backend import api_archive_backend_routes
+from compute_space.web.routes.api.discovery import discovery_routes
 from compute_space.web.routes.api.domains import api_domains_routes
 from compute_space.web.routes.api.identity import identity_routes
 from compute_space.web.routes.api.permissions_v2 import api_permissions_v2_routes
@@ -62,6 +64,7 @@ from compute_space.web.routes.pages.login import pages_login_routes
 from compute_space.web.routes.pages.permissions_v2 import pages_permissions_v2_routes
 from compute_space.web.routes.pages.settings import pages_settings_routes
 from compute_space.web.routes.pages.system import pages_system_routes
+from compute_space.web.routes.redirect import redirect_routes
 from compute_space.web.routes.services_v2 import services_v2_routes
 
 
@@ -162,8 +165,8 @@ def setup_already_done_post() -> None:
     raise PermissionDeniedException(detail="This instance has already been set up.")
 
 
-def _login_required_redirect(request: Request[Any, Any, Any], exc: NotAuthorizedException) -> Response[Any]:
-    """Exception handler: redirect HTML clients to /login; JSON clients get 401.
+def _auth_required_handler(request: Request[Any, Any, Any], exc: NotAuthorizedException) -> Response[Any]:
+    """Exception handler: JSON clients get 401; HTML clients get auth_required_response.
 
     websocket-type requests should never get here - they start as HTTP requests with `Upgrade: websocket`, and should fail then.
     """
@@ -173,7 +176,7 @@ def _login_required_redirect(request: Request[Any, Any, Any], exc: NotAuthorized
             content["extra"] = exc.extra
         return Response(content=content, status_code=401)
 
-    return login_required_redirect(request)
+    return auth_required_response(request, exc)
 
 
 def _log_unhandled_exception(request: Request[Any, Any, Any], exc: Exception) -> Response[Any]:
@@ -202,12 +205,12 @@ def _reject_app_subdomain_requests(request: Request[Any, Any, Any]) -> Response[
     netloc = request.url.netloc
     with closing(get_db()) as db:
         matched = Domain.match(db, netloc)
-    if matched is not None and matched.is_app_subdomain(netloc):
+    if matched is not None and matched.looks_like_app_subdomain(netloc):
         return Response(content=None, status_code=404)
     return None
 
 
-def create_app(config: Config, dns_provider: InternalDnsProvider) -> ASGIApp:
+def create_app(config: Config, dns_provider: InternalDnsProvider, mdns_responder: MdnsResponder) -> ASGIApp:
     """Build the full router ASGI app.  The returned app is the Litestar app wrapped
     in ``SubdomainProxyMiddleware`` so app-subdomain requests are diverted to backend
     containers before Litestar attempts any routing.  Caller must have already
@@ -243,6 +246,7 @@ def create_app(config: Config, dns_provider: InternalDnsProvider) -> ASGIApp:
             api_apps_routes,
             api_archive_backend_routes,
             api_domains_routes,
+            discovery_routes,
             api_permissions_v2_routes,
             api_services_v2_routes,
             api_settings_routes,
@@ -254,6 +258,7 @@ def create_app(config: Config, dns_provider: InternalDnsProvider) -> ASGIApp:
             pages_permissions_v2_routes,
             pages_settings_routes,
             pages_system_routes,
+            redirect_routes,
             services_v2_routes,
             setup_already_done_get,
             setup_already_done_post,
@@ -264,9 +269,10 @@ def create_app(config: Config, dns_provider: InternalDnsProvider) -> ASGIApp:
             "config": Provide(provide_config, sync_to_thread=False),
             "db": Provide(provide_db),
             "dns_provider": Provide(lambda: dns_provider, sync_to_thread=False, use_cache=True),
+            "mdns_responder": Provide(lambda: mdns_responder, sync_to_thread=False, use_cache=True),
         },
         exception_handlers={
-            NotAuthorizedException: _login_required_redirect,
+            NotAuthorizedException: _auth_required_handler,
             Exception: _log_unhandled_exception,
         },
         on_startup=[_install_template_globals],

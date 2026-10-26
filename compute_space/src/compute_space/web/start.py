@@ -16,6 +16,7 @@ from compute_space.config import Config
 from compute_space.config import load_config
 from compute_space.config import set_active_config
 from compute_space.core.auth.keys import load_keys
+from compute_space.core.auto_update.runner import start_auto_update_task
 from compute_space.core.caddy import CaddyProcess
 from compute_space.core.caddy import config_cert_resolver
 from compute_space.core.caddy import reload_caddy_for_domains
@@ -35,6 +36,7 @@ from compute_space.core.ip import infer_inbound_ipv4
 from compute_space.core.ip import is_bindable
 from compute_space.core.logging import logger
 from compute_space.core.logging import setup_file_logging
+from compute_space.core.mdns.responder import MdnsResponder
 from compute_space.core.operation_locks import wait_for_operations
 from compute_space.core.pinned_binary import get_pinned_binary
 from compute_space.core.pinned_binary import install_pinned_binary
@@ -193,6 +195,9 @@ async def _main() -> None:
         _require_configured_domain(domains)
 
         dns_provider = await _start_dns(config, domains)
+        # Started regardless; it only listens while a `.local` domain is configured.
+        mdns_responder = MdnsResponder()
+        await mdns_responder.update(domains)
 
         if domains[0].tls:  # primary is a TLS domain
             await _ensure_tls_cert(config, db, dns_provider)
@@ -242,6 +247,7 @@ async def _main() -> None:
         if caddy is not None:
             await caddy.stop()
         await dns_provider.cleanup()
+        await mdns_responder.stop()
 
     hypercorn_config = hypercorn.config.Config()
     # Bind the primary address (127.0.0.1 in production) plus the container
@@ -275,8 +281,10 @@ async def _main() -> None:
             await asyncio.sleep(0.1)
             os._exit(0)
 
+    background_tasks.append(start_auto_update_task())
+
     # Main web server
-    app = create_app(config, dns_provider)
+    app = create_app(config, dns_provider, mdns_responder)
     logger.info("running hypercorn serve")
     restart_requested = await _serve(app, hypercorn_config)
     logger.info(f"hypercorn serve returned, restart_requested={restart_requested}")
