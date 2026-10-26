@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,6 +26,7 @@ from compute_space.db.schema import schema_path
 from compute_space.tests._litestar_helpers import make_http_scope
 from compute_space.tests._litestar_helpers import stash_zone_middleware
 from compute_space.tests.conftest import _make_test_config
+from compute_space.web.auth.confirm_navigation import NavigationConfirmationRequired
 from compute_space.web.helpers.app_starting import app_starting_response
 from compute_space.web.helpers.zone import ZONE_SCOPE_KEY
 
@@ -94,6 +96,65 @@ def test_safe_plain_http_cookie_skips_api_validation(cookie: str) -> None:
     validate.assert_not_called()
 
 
+@pytest.mark.parametrize("token_state", ["valid", "invalid", "expired", "revoked", "absent"])
+def test_owner_bearer_can_authenticate_without_navigation_evidence(cookie: str, token_state: str) -> None:
+    token = "owner-token-for-navigation-test"
+    db = auth.get_db()
+    expires = "2000-01-01T00:00:00+00:00" if token_state == "expired" else "2100-01-01T00:00:00+00:00"
+    db.execute(
+        "INSERT INTO api_tokens (token_hash, name, expires_at) VALUES (?, 'navigation', ?)",
+        (hashlib.sha256(token.encode()).hexdigest(), expires),
+    )
+    if token_state == "revoked":
+        db.execute("DELETE FROM api_tokens")
+    db.commit()
+    headers = {"Accept": "text/html"}
+    if token_state != "absent":
+        headers["Authorization"] = f"Bearer {'invalid-token' if token_state == 'invalid' else token}"
+    connection = ASGIConnection(
+        make_http_scope(
+            "GET",
+            "/owner",
+            host=HOST,
+            cookie=cookie,
+            headers=headers,
+            extra_scope={ZONE_SCOPE_KEY: Domain(ZONE, tls=False)},
+        )
+    )
+    if token_state == "valid":
+        auth.verify_owner_auth(connection)
+    else:
+        with pytest.raises(NavigationConfirmationRequired):
+            auth.verify_owner_auth(connection)
+
+
+@pytest.mark.parametrize("header", ["Origin", "Referer"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "",
+        "null",
+        "//{host}",
+        "ftp://{host}",
+        "http://{host}:bad",
+        "http://{host}:65536",
+        "http://{host}:0",
+        "http://{host}\\evil",
+        "http://{host}\n",
+        "http://user@{host}",
+    ],
+)
+def test_invalid_plain_http_evidence_is_rejected(cookie: str, header: str, source: str) -> None:
+    with pytest.raises(NotAuthorizedException):
+        auth.verify_owner_auth(request(cookie, {header: source.format(host=HOST)}))
+
+
+@pytest.mark.parametrize("origin", ["null", "http://other.testzone.local", f"https://{HOST}"])
+def test_referer_cannot_rescue_a_foreign_origin(cookie: str, origin: str) -> None:
+    with pytest.raises(NotAuthorizedException):
+        auth.verify_owner_auth(request(cookie, {"Origin": origin, "Referer": f"http://{HOST}/source"}))
+
+
 def test_starting_page_retains_same_origin_reload_evidence(cookie: str) -> None:
     @get("/waiting", guards=[auth.require_owner_auth], sync_to_thread=False)
     def waiting(request: Request[Any, Any, Any]) -> ASGIResponse:
@@ -109,6 +170,5 @@ def test_starting_page_retains_same_origin_reload_evidence(cookie: str) -> None:
         )
     assert response.status_code == 503
     assert "app-starting" in response.text
-    # A real Chromium reload after a no-referrer response omits Referer and
-    # returns to Continue instead of automatically opening the ready app.
+    # Same-origin reloads need Referer evidence while the app starts.
     assert response.headers["referrer-policy"] == "same-origin"

@@ -88,6 +88,22 @@ def _url_host(raw: str) -> str:
     return f"{host}:{port}" if port else host
 
 
+def _http_origin(raw: str, *, referer: bool = False) -> tuple[str, str, int] | None:
+    """Parse an HTTP origin, allowing a full URL only for Referer evidence."""
+    if any(char.isspace() or ord(char) < 32 or char == "\\" for char in raw):
+        return None
+    try:
+        parsed = urlparse(raw)
+        host, port = parsed.hostname, parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not host or parsed.username is not None:
+        return None
+    if not referer and any(char in raw.partition("://")[2] for char in "/?#"):
+        return None
+    return parsed.scheme, host, port if port is not None else (80 if parsed.scheme == "http" else 443)
+
+
 def _plain_http_zone(connection: AnyConnection) -> Domain | None:
     """The non-TLS Domain the request arrived on, if any. Only server-side domain config decides this."""
     zone = connection.scope.get(ZONE_SCOPE_KEY)
@@ -139,18 +155,21 @@ def _is_safe_for_cookie_auth_plain_http(connection: Request[Any, Any, Any]) -> b
     zone = _plain_http_zone(connection)
     if zone is None:
         return False
-    target = connection.base_url.netloc
-    if (origin := get_connection_origin(connection)) is not None:
-        return origin == target
+    target = _http_origin(f"http://{connection.base_url.netloc}")
+    if target is None:
+        return False
+    if (origin := connection.headers.get("Origin")) is not None:
+        return _http_origin(origin) == target
     referer = connection.headers.get("Referer")
-    if referer is not None and _url_host(referer) == target:
+    referer_origin = _http_origin(referer, referer=True) if referer is not None else None
+    if referer_origin == target:
         return True
     accept = connection.headers.get("Accept", "")
     if (
         connection.scope["method"] == "GET"
         and "text/html" in accept
         and "application/json" not in accept
-        and (referer is None or zone.owns(_url_host(referer)))
+        and (referer is None or (referer_origin is not None and zone.owns(referer_origin[1])))
     ):
         raise NavigationConfirmationRequired(detail="confirm this navigation to use cookie authentication")
     return False
@@ -217,14 +236,20 @@ def verify_owner_auth(connection: AnyConnection) -> None:
     accessor = authenticate(connection, db=db)
 
     if isinstance(accessor, AuthenticatedUser):
+        confirmation = None
+        try:
+            if is_safe_for_cookie_auth(connection):
+                return
+        except NavigationConfirmationRequired as exc:
+            confirmation = exc
         # API credentials should work even when a browser also sends its
         # session cookie on a cross-origin request, such as an extension upload.
         if token := _get_bearer_token_if_set(connection):
             if validate_api_token(token, db) is not None:
                 return
-        if not is_safe_for_cookie_auth(connection):
-            raise NotAuthorizedException(detail="cookie authentication is only valid for safe-origin requests")
-        return
+        if confirmation is not None:
+            raise confirmation
+        raise NotAuthorizedException(detail="cookie authentication is only valid for safe-origin requests")
     if isinstance(accessor, AuthenticatedAPIKey):
         # API key requests won't come from untrusted JS, so can be trusted regardless of origin.
         return

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from litestar import Request
+from litestar.exceptions import NotAuthorizedException
 
 from compute_space.core.domains import Domain
 from compute_space.tests._litestar_helpers import make_http_scope
@@ -24,5 +25,5 @@ def test_only_get_and_head_redirect_to_login(tmp_path: Path, method: str, expect
         host="miniflux.testzone.local",
         extra_scope={ZONE_SCOPE_KEY: Domain(name="testzone.local", tls=True)},
     )
-    response = auth_required_response(Request(scope))  # type: ignore[arg-type]
+    response = auth_required_response(Request(scope), NotAuthorizedException())  # type: ignore[arg-type]
     assert response.status_code == expected

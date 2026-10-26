@@ -11,7 +11,7 @@ RETRY_SECONDS = 3
 
 
 def app_starting_response(request: Request[Any, Any, Any]) -> ASGIResponse:
-    headers = {"Cache-Control": "no-store", "Retry-After": str(RETRY_SECONDS), "Referrer-Policy": "no-referrer"}
+    headers = {"Cache-Control": "no-store", "Retry-After": str(RETRY_SECONDS), "Referrer-Policy": "same-origin"}
     fetch_mode = request.headers.get("sec-fetch-mode")
     # Browsers identify document/frame loads directly. Plain-HTTP browsers may
     # omit Fetch Metadata; their usual Accept header starts with unqualified HTML.
