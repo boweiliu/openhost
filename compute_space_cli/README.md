@@ -116,7 +116,7 @@ bottle curl https://myzone.example.com/api/apps          # GET with bearer token
 bottle curl -X POST https://myzone.example.com/api/...   # any curl args work
 ```
 
-`bottle curl` runs `curl` with `Authorization: Bearer <token>` pre-injected for the current instance. If the owner has moved the dashboard to a subdomain, use that subdomain: the bare domain may be serving an app, which would receive your token. `GET https://<domain>/.well-known/cloud-in-a-bottle` (no token) tells you where it is. Useful for hitting the API or testing app endpoints without copying tokens by hand.
+`bottle curl` runs `curl` with `X-OpenHost-Authorization: Bearer <token>` pre-injected for the current instance. If the owner has moved the dashboard to a subdomain, use that subdomain: the bare domain may be serving an app, which would receive your token. `GET https://<domain>/.well-known/cloud-in-a-bottle` (no token) tells you where it is. Useful for hitting the API or testing app endpoints without copying tokens by hand.
 
 ## Update
 

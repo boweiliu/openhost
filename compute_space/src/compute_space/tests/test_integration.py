@@ -712,6 +712,39 @@ class TestContainerE2E:
             token_id = next(t["id"] for t in tokens if t["name"] == "proxy-strip-test")
             admin_session.delete(f"{base}/api/tokens/{token_id}")
 
+    def test_proxy_openhost_auth_header_authenticates_and_is_stripped(self, admin_session, config):
+        """X-OpenHost-Authorization authenticates the owner, isn't forwarded, and leaves Authorization alone."""
+        base = _zone_url(config)
+        r = admin_session.post(f"{base}/api/tokens", json={"name": "oh-header-test", "expiry_hours": "1"})
+        assert r.status_code == 200
+        raw_token = r.json()["token"]
+        try:
+            r = requests.get(
+                f"{_app_url(config, 'test-app')}/echo-headers",
+                headers={
+                    "X-OpenHost-Authorization": f"Bearer {raw_token}",
+                    "Authorization": "Bearer the-apps-own-token",
+                },
+            )
+            assert r.status_code == 200
+            headers_ci = {k.lower(): v for k, v in r.json()["headers"].items()}
+            assert "x-openhost-authorization" not in headers_ci
+            assert headers_ci.get("x-openhost-is-owner") == "true"
+            assert headers_ci.get("authorization") == "Bearer the-apps-own-token"
+        finally:
+            tokens = admin_session.get(f"{base}/api/tokens").json()
+            token_id = next(t["id"] for t in tokens if t["name"] == "oh-header-test")
+            admin_session.delete(f"{base}/api/tokens/{token_id}")
+
+    def test_proxy_openhost_auth_header_typo_fails_closed(self, admin_session, config):
+        """A mistyped token in X-OpenHost-Authorization doesn't authenticate; a private app 404s."""
+        r = requests.get(
+            f"{_app_url(config, 'test-app')}/echo-headers",
+            headers={"X-OpenHost-Authorization": "Bearer not-a-real-token"},
+            allow_redirects=False,
+        )
+        assert r.status_code == 404
+
     def test_proxy_forwards_foreign_authorization(self, admin_session, config):
         """A bearer the router doesn't recognise belongs to the app's own auth -- pass it through.
 

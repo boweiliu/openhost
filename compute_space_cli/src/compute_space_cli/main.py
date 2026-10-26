@@ -80,7 +80,7 @@ def resolve_api_instance(bottle: Bottle) -> config.Instance:
 class Status:
     def __call__(self, cfg: Annotated[config.Instance, Dep(resolve_api_instance)]) -> None:
         try:
-            resp = httpx.get(cfg.url, headers={"Authorization": f"Bearer {cfg.token}"}, timeout=10)
+            resp = httpx.get(cfg.url, headers={"X-OpenHost-Authorization": f"Bearer {cfg.token}"}, timeout=10)
             print(f"{cfg.url} — up (HTTP {resp.status_code})")
         except httpx.ConnectError:
             print(f"{cfg.url} — unreachable", file=sys.stderr)
@@ -428,7 +428,7 @@ class InstanceCmd:
         try:
             resp = httpx.get(
                 f"{url}/dashboard",
-                headers={"Authorization": f"Bearer {token}"},
+                headers={"X-OpenHost-Authorization": f"Bearer {token}"},
                 timeout=10,
                 follow_redirects=False,
             )
@@ -646,7 +646,7 @@ class Curl:
         if not curl:
             print("curl not found on PATH", file=sys.stderr)
             raise SystemExit(1)
-        cmd = [curl, "-H", f"Authorization: Bearer {cfg.token}", *self.args]
+        cmd = [curl, "-H", f"X-OpenHost-Authorization: Bearer {cfg.token}", *self.args]
         raise SystemExit(subprocess.call(cmd))
 
 

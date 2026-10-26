@@ -48,7 +48,8 @@ def test_bearer_header_attached() -> None:
     ) as mock_req:
         make_api_request("https://x", "tok-123", "GET", "/api/foo")
         kwargs = mock_req.call_args.kwargs
-        assert kwargs["headers"]["Authorization"] == "Bearer tok-123"
+        assert kwargs["headers"]["X-OpenHost-Authorization"] == "Bearer tok-123"
+        assert "Authorization" not in kwargs["headers"]
 
 
 @pytest.mark.parametrize(

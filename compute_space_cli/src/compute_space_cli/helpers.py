@@ -43,7 +43,7 @@ def make_api_request(
     raw: bool = False,
 ) -> httpx.Response:
     headers = {
-        "Authorization": f"Bearer {token}",
+        "X-OpenHost-Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
     resp = httpx.request(

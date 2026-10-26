@@ -38,18 +38,26 @@ from compute_space.web.helpers.zone import zone_for_request
 AnyConnection = ASGIConnection[Any, Any, Any, Any]
 
 
-def _get_bearer_tokens(headers: Headers) -> list[str]:
-    """Every non-blank token from ``Authorization: Bearer <token>`` headers, in order."""
+# stripped by the proxy along with every other X-OpenHost-* header, so it can never reach an app.
+OPENHOST_AUTHORIZATION_HEADER = "X-OpenHost-Authorization"
+
+
+def _get_bearer_tokens(headers: Headers, name: str = "Authorization") -> list[str]:
+    """Every non-blank token from ``<name>: Bearer <token>`` headers, in order."""
     tokens: list[str] = []
     for key, value in headers.multi_items():
-        if key.lower() == "authorization" and value.lower().startswith("bearer "):
+        if key.lower() == name.lower() and value.lower().startswith("bearer "):
             if token := value[7:].strip():
                 tokens.append(token)
     return tokens
 
 
 def _get_bearer_token_if_set(connection: AnyConnection) -> str | None:
-    tokens = _get_bearer_tokens(connection.headers)
+    # when the OpenHost header is set we don't fall back, so a malformed one fails closed.
+    if connection.headers.get(OPENHOST_AUTHORIZATION_HEADER):
+        tokens = _get_bearer_tokens(connection.headers, OPENHOST_AUTHORIZATION_HEADER)
+    else:
+        tokens = _get_bearer_tokens(connection.headers)
     return tokens[0] if tokens else None
 
 
@@ -233,7 +241,7 @@ def authenticate(connection: AnyConnection, db: sqlite3.Connection) -> Authentic
         if authenticated_user := validate_session_token(session_token, db):
             return authenticated_user
 
-    # api and app tokens are both set in Authorization: Bearer header
+    # api and app tokens are bearer tokens in X-OpenHost-Authorization, or the deprecated Authorization.
     if token := _get_bearer_token_if_set(connection):
         # api token
         if authenticated_api_token := validate_api_token(token, db):

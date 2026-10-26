@@ -34,7 +34,13 @@ A request with neither header, such as a typed URL, a bookmark, or a link from a
 
 The router is the sole authority for the `X-OpenHost-*` headers an app receives. Anything a client sends under those names is stripped before the app sees it, so an app can trust `X-OpenHost-Is-Owner` and a provider can trust the consumer name it is handed.
 
-None of those credentials is forwarded to an app: the session cookie is stripped from `Cookie`, and `Authorization` is dropped when it carries a token the router accepts. Otherwise an app could replay it against the router. Apps identify the caller via `X-OpenHost-Is-Owner` and `X-OpenHost-Consumer-Id` instead.
+## Credentials never reach an app
+
+No openhost credential is forwarded to an app, since the app could replay it against the router. Apps identify the caller via `X-OpenHost-Is-Owner` and `X-OpenHost-Consumer-Id` instead.
+
+Send your token as `X-OpenHost-Authorization: Bearer <token>`. Like every `X-OpenHost-*` header it is stripped by name, whatever its value, which leaves `Authorization` free for the app's own use. The session cookie is likewise stripped from `Cookie` by name.
+
+Plain `Authorization: Bearer <token>` is deprecated but still accepted. It is only dropped when the router recognises the token, so a mistyped or expired token is forwarded to the app on `public_paths` routes.
 
 ## Catalog apps
 
