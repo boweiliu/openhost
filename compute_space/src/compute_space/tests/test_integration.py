@@ -712,18 +712,12 @@ class TestContainerE2E:
             admin_session.delete(f"{base}/api/tokens/{token_id}")
 
     def test_proxy_openhost_auth_header_authenticates_and_is_stripped(self, admin_session, config):
-        """The dedicated header authenticates the owner and never reaches the app.
-
-        This is the headline property: because it is stripped by *name*, the app cannot see it no
-        matter what the value is, and ``Authorization`` is left free for the app's own auth.  Both
-        halves are asserted here in one request.
-        """
+        """X-OpenHost-Authorization authenticates the owner, isn't forwarded, and leaves Authorization alone."""
         base = _zone_url(config)
         r = admin_session.post(f"{base}/api/tokens", json={"name": "oh-header-test", "expiry_hours": "1"})
         assert r.status_code == 200
         raw_token = r.json()["token"]
         try:
-            # no cookies: the OpenHost header is the only thing authenticating this request
             r = requests.get(
                 f"{_app_url(config, 'test-app')}/echo-headers",
                 headers={
@@ -735,7 +729,6 @@ class TestContainerE2E:
             headers_ci = {k.lower(): v for k, v in r.json()["headers"].items()}
             assert "x-openhost-authorization" not in headers_ci
             assert headers_ci.get("x-openhost-is-owner") == "true"
-            # the app still gets its own bearer: that is the reason for the split
             assert headers_ci.get("authorization") == "Bearer the-apps-own-token"
         finally:
             tokens = admin_session.get(f"{base}/api/tokens").json()
@@ -743,12 +736,7 @@ class TestContainerE2E:
             admin_session.delete(f"{base}/api/tokens/{token_id}")
 
     def test_proxy_openhost_auth_header_typo_fails_closed(self, admin_session, config):
-        """A mistyped token in the OpenHost header authenticates nobody, so the app is never reached.
-
-        The by-name strip that keeps a mistyped value from reaching a *public* route is covered
-        directly in test_proxy_headers.py, where the sanitizer can be fed garbage values; test-app
-        declares no public_paths, so every route here is owner-gated.
-        """
+        """A mistyped token in X-OpenHost-Authorization redirects to login."""
         r = requests.get(
             f"{_app_url(config, 'test-app')}/echo-headers",
             headers={"X-OpenHost-Authorization": "Bearer not-a-real-token"},

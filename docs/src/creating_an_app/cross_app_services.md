@@ -20,7 +20,7 @@ The owner approves those grants when they install your app. Then call the servic
 
 ```bash
 curl -X POST "$BOTTLE_ROUTER_URL/api/services/v2/call/secrets/get" \
-  -H "Authorization: Bearer $BOTTLE_APP_TOKEN" \
+  -H "X-OpenHost-Authorization: Bearer $BOTTLE_APP_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"keys": ["MY_API_KEY"]}'
 ```
@@ -80,13 +80,13 @@ Each entry in `grants` is either an opaque string (e.g. `"read"`) or a TOML/JSON
 ```
 GET|POST|WS|... [BOTTLE_ROUTER_URL]/api/services/v2/call/<shortname>/<rest>
 ```
-along with `Authorization: Bearer $BOTTLE_APP_TOKEN` header for server-side requests.
+along with `X-OpenHost-Authorization: Bearer $BOTTLE_APP_TOKEN` header for server-side requests.
 `BOTTLE_ROUTER_URL` is provided to apps as an env var.
 
 This endpoint is app-specific - the router loads the consumer's manifest, finds the `[[services.v2.consumes]]` entry matching `<shortname>`, resolves the correct provider of the requested service, and proxies to `provider_app.BOTTLE_ROUTER_URL/<provider_endpoint>/<rest>`.
 
 The router identifies and authenticates the calling app two ways:
-- **Server-side calls:** must include `Authorization: Bearer $BOTTLE_APP_TOKEN`. Each app gets a unique `BOTTLE_APP_TOKEN` injected as an env var at deploy time. `X-OpenHost-Authorization: Bearer $BOTTLE_APP_TOKEN` is also accepted and is preferred for new apps, since the router strips that header by name and so can never pass your app token on to a provider.
+- **Server-side calls:** must include `X-OpenHost-Authorization: Bearer $BOTTLE_APP_TOKEN`. Each app gets a unique `BOTTLE_APP_TOKEN` injected as an env var at deploy time. `Authorization: Bearer $BOTTLE_APP_TOKEN` is still accepted for now, but is deprecated.
 - **Browser calls:** the request's `Origin` is matched against the app's subdomain, with the owner session cookie authenticating the user. No bearer token is needed for these; the browser provides the cookie automatically.
 
 Service calls should be API-only - the user's browser should never be redirected to a service endpoint, with the exception of permission grant pages.
@@ -115,7 +115,7 @@ To call a non-default provider, include the `X-OpenHost-Provider` header with th
 
 ```
 GET [BOTTLE_ROUTER_URL]/api/services/v2/call/<shortname>/<rest>
-Authorization: Bearer $BOTTLE_APP_TOKEN
+X-OpenHost-Authorization: Bearer $BOTTLE_APP_TOKEN
 X-OpenHost-Provider: <provider_app_id>
 ```
 
@@ -194,7 +194,7 @@ Note for `scope: "app"`, the provider must include its own `grant_url`.
 
    ```
    POST [BOTTLE_ROUTER_URL]/api/permissions/v2/grant_app_scoped
-   Authorization: Bearer $BOTTLE_APP_TOKEN
+   X-OpenHost-Authorization: Bearer $BOTTLE_APP_TOKEN
    Content-Type: application/json
 
    {"consumer_app_name": "<consumer_app_name>", "service_url": "<url>", "grant": <grant>}
@@ -237,13 +237,13 @@ Many existing apps provide or consume APIs in a way that is not native to Cloud 
 
 #### Consumer apps
 
-Consumer apps need to include the `Authorization` header on server-side requests. This can be added by a little reverse proxy running in in the application container, like [`mitmproxy`](https://github.com/mitmproxy/mitmproxy).
+Consumer apps need to include the `X-OpenHost-Authorization` header on server-side requests. This can be added by a little reverse proxy running in in the application container, like [`mitmproxy`](https://github.com/mitmproxy/mitmproxy).
 
 ```sh
 # <shortname> matches the [[services.v2.consumes]] entry in your manifest.
 mitmdump -p 9000 \
   --mode reverse:$BOTTLE_ROUTER_URL/api/services/v2/call/<shortname> \
-  --set "modify_headers=/~q/Authorization/Bearer $BOTTLE_APP_TOKEN"
+  --set "modify_headers=/~q/X-OpenHost-Authorization/Bearer $BOTTLE_APP_TOKEN"
 ```
 
 Then point the app at `http://localhost:9000` and a request to `http://localhost:9000/target_api_endpoint` will reach `$BOTTLE_ROUTER_URL/api/services/v2/call/<shortname>/target_api_endpoint` with the bearer token attached.

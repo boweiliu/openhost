@@ -156,11 +156,10 @@ def test_carries_ignores_foreign_and_non_bearer_schemes(tmp_path: Path) -> None:
     assert carries_openhost_credential(Headers({"Accept": "*/*"})) is False
 
 
-# -- X-OpenHost-Authorization: the dedicated, stripped-by-name channel -------
+# -- X-OpenHost-Authorization ----------------------------------------------
 
 
 def test_openhost_authorization_never_reaches_the_app() -> None:
-    """Stripped by name, so the value is irrelevant: typo, expired or foreign tokens all go."""
     for value in ("Bearer owner-token", "Bearer typ0ed-token", "Bearer ", "garbage"):
         assert _sanitize_forwarded_headers(
             [(OPENHOST_AUTHORIZATION_HEADER, value), ("Accept", "*/*")], strip_authorization=False
@@ -168,7 +167,6 @@ def test_openhost_authorization_never_reaches_the_app() -> None:
 
 
 def test_openhost_header_leaves_authorization_for_the_app() -> None:
-    """The point of the split: authenticate to the router and still hand the app its own bearer."""
     sanitized = _sanitize_forwarded_headers(
         [
             (OPENHOST_AUTHORIZATION_HEADER, "Bearer owner-token"),
@@ -189,7 +187,6 @@ def test_openhost_header_authenticates(tmp_path: Path) -> None:
 
 
 def test_openhost_header_takes_precedence_over_authorization(tmp_path: Path) -> None:
-    """A request may carry both; ours wins and the app's bearer is ignored for auth."""
     init_db(str(tmp_path / "test.db"))
     with sqlite3.connect(str(tmp_path / "test.db")) as db:
         _add_api_token(db, "owner-token")
@@ -204,7 +201,6 @@ def test_openhost_header_takes_precedence_over_authorization(tmp_path: Path) -> 
 
 
 def test_openhost_header_present_but_bad_does_not_fall_back(tmp_path: Path) -> None:
-    """Fail closed: a malformed OpenHost header must not silently fall back to Authorization."""
     init_db(str(tmp_path / "test.db"))
     with sqlite3.connect(str(tmp_path / "test.db")) as db:
         _add_api_token(db, "owner-token")
@@ -214,7 +210,6 @@ def test_openhost_header_present_but_bad_does_not_fall_back(tmp_path: Path) -> N
 
 
 def test_authorization_still_authenticates_on_its_own(tmp_path: Path) -> None:
-    """The deprecated path keeps working while clients migrate."""
     init_db(str(tmp_path / "test.db"))
     with sqlite3.connect(str(tmp_path / "test.db")) as db:
         _add_api_token(db, "owner-token")

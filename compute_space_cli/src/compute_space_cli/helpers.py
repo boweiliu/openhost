@@ -43,8 +43,6 @@ def make_api_request(
     raw: bool = False,
 ) -> httpx.Response:
     headers = {
-        # X-OpenHost-Authorization, not Authorization: the router strips this header by name before
-        # forwarding to an app, so the token cannot leak even if we aim it at an app subdomain.
         "X-OpenHost-Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
