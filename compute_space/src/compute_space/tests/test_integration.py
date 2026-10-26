@@ -737,14 +737,13 @@ class TestContainerE2E:
             admin_session.delete(f"{base}/api/tokens/{token_id}")
 
     def test_proxy_openhost_auth_header_typo_fails_closed(self, admin_session, config):
-        """A mistyped token in X-OpenHost-Authorization redirects to login."""
+        """A mistyped token in X-OpenHost-Authorization doesn't authenticate; a private app 404s."""
         r = requests.get(
             f"{_app_url(config, 'test-app')}/echo-headers",
             headers={"X-OpenHost-Authorization": "Bearer not-a-real-token"},
             allow_redirects=False,
         )
-        assert r.status_code == 302
-        assert "/login" in r.headers["Location"]
+        assert r.status_code == 404
 
     def test_proxy_forwards_foreign_authorization(self, admin_session, config):
         """A bearer the router doesn't recognise belongs to the app's own auth -- pass it through.
