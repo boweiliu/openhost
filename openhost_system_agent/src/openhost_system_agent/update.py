@@ -7,6 +7,7 @@ import urllib.parse
 from pathlib import Path
 from typing import NoReturn
 
+import attr
 import git
 from loguru import logger
 
@@ -21,6 +22,7 @@ from openhost_system_agent.protocol import DiffCommit
 from openhost_system_agent.protocol import DiffResult
 from openhost_system_agent.protocol import FetchResult
 from openhost_system_agent.protocol import RemoteInfo
+from openhost_system_agent.protocol import UpdateChannel
 from openhost_system_agent.reclaim import reclaim_host_ownership
 from openhost_system_agent.updater import progress
 from openhost_system_agent.updater.launcher import launch_updater
@@ -81,33 +83,54 @@ def _strip_credentials(url: str) -> str:
 
 
 # A release tag is "v" followed by dot-separated integers (v1, v1.2, v1.2.3).
-# Other v-prefixed tags (e.g. v1.2.0-rc1) are ignored so version parsing
-# can't crash on them.
+# A release candidate adds "-rc.N" (v1.2.0-rc.1); it is never a stepping stone,
+# only the optional last hop (see _next_step). Any other v-prefixed tag is
+# ignored so version parsing can't crash on it.
 _RELEASE_TAG = re.compile(r"v\d+(?:\.\d+)*")
+_RC_TAG = re.compile(r"v\d+(?:\.\d+)*-rc\.\d+")
 
 
-def _version_key(tag_name: str) -> tuple[int, ...]:
-    return tuple(int(x) for x in tag_name.lstrip("v").split("."))
+def _version_key(tag_name: str) -> tuple[tuple[int, ...], int, int]:
+    version, _, rc = tag_name.lstrip("v").partition("-rc.")
+    # A release sorts after its own candidates: v1.2.0-rc.1 < v1.2.0-rc.2 < v1.2.0.
+    return tuple(int(x) for x in version.split(".")), 0 if rc else 1, int(rc or 0)
+
+
+def _is_version_tag(name: str) -> bool:
+    return bool(_RELEASE_TAG.fullmatch(name) or _RC_TAG.fullmatch(name))
 
 
 def _get_sorted_tags(repo: git.Repo) -> list[str]:
     return sorted([t.name for t in repo.tags if _RELEASE_TAG.fullmatch(t.name)], key=_version_key)
 
 
+def _newest_candidate(repo: git.Repo) -> str | None:
+    return max((t.name for t in repo.tags if _RC_TAG.fullmatch(t.name)), key=_version_key, default=None)
+
+
 def _current_tag(repo: git.Repo) -> str | None:
-    try:
-        result: str = repo.git.describe("--tags", "--exact-match", "HEAD")
-    except git.GitCommandError:
-        return None
-    return result if _RELEASE_TAG.fullmatch(result) else None
+    """The highest release or candidate tag on HEAD itself.
+
+    Not ``git describe --exact-match``: a release is often tagged on its last candidate's commit, and describe may
+    name the candidate, which would make the walk "step" onto the release's (identical) commit forever.
+    """
+    tags = [t for t in repo.git.tag("--points-at", "HEAD").split() if _is_version_tag(t)]
+    return max(tags, key=_version_key, default=None)
 
 
 def _latest_ancestor_tag(repo: git.Repo) -> str | None:
-    try:
-        result: str = repo.git.describe("--tags", "--abbrev=0", "HEAD")
-    except git.GitCommandError:
-        return None
-    return result if _RELEASE_TAG.fullmatch(result) else None
+    """The highest release or candidate tag in HEAD's history (HEAD included).
+
+    Candidates count so that a host on one is measured from there: otherwise a fix release on the older line (v1.2.1
+    while on v1.3.0-rc.2) would walk it backwards, and with the candidate hop, back and forth forever.
+
+    Not ``git describe``: it returns only the nearest tag of any name, so an unrecognized tag nearer to HEAD would
+    hide every release behind it, and the walk would restart from the oldest tag.
+
+    Kept in sync with apply_after_checkout._latest_ancestor_tag.
+    """
+    merged: str = repo.git.tag("--merged", "HEAD")
+    return max((t for t in merged.split() if _is_version_tag(t)), key=_version_key, default=None)
 
 
 # ── Target ref (pin to a branch/commit instead of the latest tag) ────
@@ -117,6 +140,12 @@ def _latest_ancestor_tag(repo: git.Repo) -> str | None:
 # end on this ref (a branch tip or commit) instead of the latest tag. Unset →
 # the latest tag is the destination. Kept in sync with apply_after_checkout.py.
 _TARGET_REF_CONFIG = "openhost.target-ref"
+
+# Persisted in git config. When true, the walk takes one more hop after the
+# releases: to the newest release candidate, if it is newer than where the
+# releases left the host. Only honored on the tags channel: a pinned target ref
+# decides the destination by itself. Kept in sync with apply_after_checkout.py.
+_PRERELEASES_CONFIG = "openhost.prereleases"
 
 # Without a ceiling a hung connection blocks every future update attempt.
 _FETCH_TIMEOUT_SECONDS = 300
@@ -138,6 +167,26 @@ def _set_target_ref(repo: git.Repo, ref: str | None) -> None:
         repo.git.config("--unset-all", _TARGET_REF_CONFIG)
     except git.GitCommandError:
         pass  # already unset
+
+
+def _get_prereleases_setting(repo: git.Repo) -> bool:
+    try:
+        value: str = repo.git.config("--get", "--bool", _PRERELEASES_CONFIG)
+    except git.GitCommandError as e:
+        if e.status == 1:  # Unset: candidates are off by default.
+            return False
+        raise RuntimeError("Failed to read openhost.prereleases; set it to true or false.") from e
+    return value.strip() == "true"
+
+
+def _tags_destination(repo: git.Repo) -> str | None:
+    """Where the tags channel ends: the latest release, or the newest candidate if opted in and newer."""
+    tags = _get_sorted_tags(repo)
+    latest = tags[-1] if tags else None
+    candidate = _newest_candidate(repo) if _get_prereleases_setting(repo) else None
+    if candidate is not None and (latest is None or _version_key(candidate) > _version_key(latest)):
+        return candidate
+    return latest
 
 
 def _resolve_ref_sha(repo: git.Repo, ref: str) -> str | None:
@@ -165,7 +214,8 @@ def _next_step(repo: git.Repo) -> str | None:
 
     Release tags are walked in ascending version order as stepping stones, then
     the pinned target ref (if any) is the final hop. The destination is the
-    pinned target when set, otherwise the latest release tag.
+    pinned target when set, otherwise the latest release tag, or the newest
+    release candidate when the owner opted in and it is newer.
 
     When a target is pinned we must (1) treat "HEAD already at the target sha"
     as terminal *before* walking tags, and (2) only walk tags that are ancestors
@@ -182,13 +232,14 @@ def _next_step(repo: git.Repo) -> str | None:
     if target is not None and target_sha is None:
         raise RuntimeError(
             f"Pinned target ref '{target}' could not be resolved on the remote. "
-            "Fix or clear the pin with 'set_remote' (a URL without an @ref clears it)."
+            "Fix or clear the pin with 'set_remote' (a URL with no #branch or @ref clears it)."
         )
 
     # Terminal: already sitting on the pinned destination.
     if target_sha is not None and repo.head.commit.hexsha == target_sha:
         return None
 
+    prereleases = _get_prereleases_setting(repo) if target is None else False
     base = _current_tag(repo) or _latest_ancestor_tag(repo)
     later = [t for t in _get_sorted_tags(repo) if base is None or _version_key(t) > _version_key(base)]
     if target_sha is not None:
@@ -201,6 +252,12 @@ def _next_step(repo: git.Repo) -> str | None:
     # Tags exhausted (or none applicable): the pinned target is the final hop.
     if target_sha is not None:
         return target
+
+    # Releases exhausted on the tags channel: an opted-in host jumps straight to the newest candidate. Never through
+    # the ones before it, as a release never goes through its candidates either.
+    candidate = _newest_candidate(repo) if prereleases else None
+    if candidate is not None and (base is None or _version_key(candidate) > _version_key(base)):
+        return candidate
     return None
 
 
@@ -225,17 +282,16 @@ def fetch_updates() -> FetchResult:
             # UP_TO_DATE, which would hide the operator's broken pin forever.
             raise RuntimeError(
                 f"Pinned target ref '{target}' could not be resolved on the remote. "
-                "Fix or clear the pin with 'set_remote' (a URL without an @ref clears it)."
+                "Fix or clear the pin with 'set_remote' (a URL with no #branch or @ref clears it)."
             )
         if repo.head.commit.hexsha != sha:
             return FetchResult(state="BEHIND_REMOTE")
         return FetchResult(state="UP_TO_DATE")
 
-    tags = _get_sorted_tags(repo)
-    if not tags:
+    latest = _tags_destination(repo)
+    if latest is None:
         return FetchResult(state="UP_TO_DATE")
 
-    latest = tags[-1]
     current = _current_tag(repo) or _latest_ancestor_tag(repo)
 
     if current is None or _version_key(current) < _version_key(latest):
@@ -253,8 +309,7 @@ def show_diff() -> DiffResult:
         dest: str | None = _resolve_ref_sha(repo, target)
         dest_label = target
     else:
-        tags = _get_sorted_tags(repo)
-        dest = tags[-1] if tags else None
+        dest = _tags_destination(repo)
         dest_label = dest
 
     if dest is None:
@@ -337,7 +392,8 @@ def apply_update() -> NoReturn:
 
         progress.record("fetch", "Fetching latest code\u2026")
         _fetch_chown_host(repo, "origin", "--tags", kill_after_timeout=_FETCH_TIMEOUT_SECONDS)
-        if not _get_sorted_tags(repo) and _get_target_ref(repo) is None:
+        # Candidates count here whatever the setting: this only refuses a remote with nothing tagged at all.
+        if not _get_sorted_tags(repo) and _newest_candidate(repo) is None and _get_target_ref(repo) is None:
             raise RuntimeError("No tags found on remote. Tag a release first.")
 
         # The first step; apply_after_checkout tail-calls through the rest.
@@ -370,41 +426,111 @@ def apply_update() -> NoReturn:
 # ── Remote management ────────────────────────────────────────────────
 
 
-def set_remote_url(url: str) -> RemoteInfo:
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in _KNOWN_SCHEMES:
-        url = "https://" + url
-        parsed = urllib.parse.urlparse(url)
+@attr.s(auto_attribs=True, frozen=True)
+class ParsedRemote:
+    url: str
+    ref: str | None
+    channel: UpdateChannel
 
+
+def parse_remote(spec: str) -> ParsedRemote:
+    """Split ``<url>``, ``<url>#<branch>`` or ``<url>@<ref>`` into its parts.
+
+    Mirrored by parseRemote in compute_space/web/static/js/settings.js, which shows the channel and validation errors
+    as the owner types. Keep the two in sync.
+
+    The ``@`` is only looked for in the URL path, so ``user@host`` in the netloc is not mistaken for a ref.
+    """
+    spec = spec.strip()
+    parsed = urllib.parse.urlparse(spec)
+    if parsed.scheme not in _KNOWN_SCHEMES:
+        parsed = urllib.parse.urlparse("https://" + spec)
+    if any(c.isspace() for c in spec):
+        raise ValueError("The remote must not contain spaces.")
+
+    branch = parsed.fragment or None
+    if "#" in spec and branch is None:
+        raise ValueError("Missing branch name after '#'.")
+    path = parsed.path
     ref: str | None = None
-    if "@" in parsed.path:
-        base_path, ref = parsed.path.rsplit("@", 1)
-        url = parsed._replace(path=base_path).geturl()
+    if "@" in path:
+        if path.count("@") > 1:
+            raise ValueError("Only one '@ref' is allowed.")
+        path, ref = path.split("@")
+        if not ref:
+            raise ValueError("Missing tag or commit after '@'.")
+    if branch is not None and ref is not None:
+        raise ValueError("Use either '#branch' or '@ref', not both.")
+    if branch is not None and "#" in branch:
+        raise ValueError("Only one '#branch' is allowed.")
+
+    url = parsed._replace(path=path, fragment="").geturl()
+    if branch is not None:
+        return ParsedRemote(url=url, ref=branch, channel=UpdateChannel.BRANCH)
+    if ref is not None:
+        return ParsedRemote(url=url, ref=ref, channel=UpdateChannel.PINNED)
+    return ParsedRemote(url=url, ref=None, channel=UpdateChannel.TAGS)
+
+
+def _is_remote_branch(repo: git.Repo, name: str) -> bool:
+    try:
+        repo.git.rev_parse("--verify", "--quiet", f"refs/remotes/origin/{name}")
+        return True
+    except git.GitCommandError:
+        return False
+
+
+def set_remote_url(spec: str) -> RemoteInfo:
+    remote = parse_remote(spec)
 
     repo = _repo()
     try:
         with _get_remote(repo).config_writer as cw:
-            cw.set("url", url)
+            cw.set("url", remote.url)
     except RuntimeError:
-        repo.create_remote("origin", url)
+        repo.create_remote("origin", remote.url)
 
-    # An @ref pins to that branch/commit; the update walk (update apply) does the
-    # actual checkout+migrate+install+restart. Resolve it here so a bad @ref (typo,
-    # deleted branch) raises instead of leaving a broken pin that fetch_updates
-    # would report as UP_TO_DATE forever — but do NOT check out or restart, which
-    # would boot new code before its migrations run.
-    if ref:
-        _fetch_chown_host(repo, "origin")
-        if _resolve_ref_sha(repo, ref) is None:
-            raise RuntimeError(f"Ref '{ref}' could not be resolved on the remote. Check the branch or commit name.")
+    # Both channels persist the same target-ref; _resolve_ref_sha prefers origin/<ref>, so a branch follows its tip
+    # and a tag or commit stays put. That makes "is it a remote branch" the whole distinction, so check it here, and
+    # resolve so a typo raises instead of leaving a broken pin that fetch_updates would report as UP_TO_DATE forever.
+    # Do NOT check out or restart: the update walk does that, after running migrations.
+    if remote.ref is not None:
+        _fetch_chown_host(repo, "origin", "--tags")
+        is_branch = _is_remote_branch(repo, remote.ref)
+        if remote.channel == UpdateChannel.BRANCH and not is_branch:
+            raise RuntimeError(f"Branch '{remote.ref}' was not found on the remote.")
+        if remote.channel == UpdateChannel.PINNED and is_branch:
+            raise RuntimeError(
+                f"'{remote.ref}' is a branch. Use #{remote.ref} to follow it, or @<commit> to pin a commit."
+            )
+        if _resolve_ref_sha(repo, remote.ref) is None:
+            raise RuntimeError(f"'{remote.ref}' could not be resolved on the remote. Check the tag or commit.")
 
-    _set_target_ref(repo, ref)
+    _set_target_ref(repo, remote.ref)
 
-    return RemoteInfo(
-        url=_strip_credentials(url),
-        ref=ref or (tags[-1] if (tags := _get_sorted_tags(repo)) else "HEAD"),
-        pinned=ref is not None,
-    )
+    return get_remote_info()
+
+
+def set_prereleases(enabled: bool) -> RemoteInfo:
+    """Opt in to (or out of) release candidates on the tags channel.
+
+    Like set_remote_url this only records the choice; the next update walk acts on it. Opting out while on a
+    candidate leaves the host there until the next release, since nothing older is walked back to.
+    """
+    repo = _repo()
+    try:
+        repo.git.config("--bool", _PRERELEASES_CONFIG, "true" if enabled else "false")
+    finally:
+        # git rewrites .git/config via rename, so a root write leaves it root-owned.
+        if os.geteuid() == 0:
+            reclaim_host_ownership()
+    return get_remote_info()
+
+
+def _channel_for_target(repo: git.Repo, target: str | None) -> UpdateChannel:
+    if target is None:
+        return UpdateChannel.TAGS
+    return UpdateChannel.BRANCH if _is_remote_branch(repo, target) else UpdateChannel.PINNED
 
 
 def get_remote_info() -> RemoteInfo:
@@ -412,7 +538,21 @@ def get_remote_info() -> RemoteInfo:
     remote = _get_remote(repo)
     url = _strip_credentials(remote.url) if remote.url else None
     target = _get_target_ref(repo)
-    # When unpinned, still report the resolved current tag for display, but flag
-    # it as not pinned so the dashboard doesn't round-trip it back into a pin.
+    # On the tags channel, still report the resolved current tag for display; the channel tells the dashboard not to
+    # round-trip it back into a pin.
     ref = target or _current_tag(repo) or _latest_ancestor_tag(repo) or repo.head.commit.hexsha[:8]
-    return RemoteInfo(url=url, ref=ref, pinned=target is not None)
+    prereleases_error = None
+    try:
+        prereleases = _get_prereleases_setting(repo)
+    except RuntimeError as e:
+        # Keep Settings usable so the owner can overwrite an invalid choice.
+        # Fetch and apply still reject it instead of silently opting out.
+        prereleases = False
+        prereleases_error = str(e)
+    return RemoteInfo(
+        url=url,
+        ref=ref,
+        channel=_channel_for_target(repo, target),
+        prereleases=prereleases,
+        prereleases_error=prereleases_error,
+    )

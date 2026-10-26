@@ -19,6 +19,7 @@ import pytest
 import requests
 import websockets
 
+from compute_space.tests.local_stack import browser_session
 from compute_space.tests.utils import app_id_for
 from compute_space.tests.utils import wait_app_removed
 from compute_space.tests.utils import wait_app_running
@@ -63,8 +64,11 @@ def router_url(domain):
 
 @pytest.fixture(scope="module")
 def session(router_url):
-    """Starts unauthenticated; test_02 adds auth cookies via /setup."""
-    return requests.Session()
+    """Starts unauthenticated; test_02 adds auth cookies via /setup.
+
+    Browser-shaped (Fetch-Metadata) because owner auth fails closed without it.
+    """
+    return browser_session()
 
 
 @pytest.fixture(scope="module")
@@ -355,15 +359,17 @@ class TestSelfHost:
         assert headers.get("x-forwarded-host") != "evil.example.com"
 
     def test_07e_subdomain_unauth_rejected(self, domain):
-        """Unauthenticated subdomain request to a non-public path is rejected."""
+        """An unauthenticated private app looks like a missing app."""
         app_url = f"https://test-app.{domain}"
         r = requests.get(
             f"{app_url}/echo-headers",
             allow_redirects=False,
             timeout=10,
         )
-        # Non-public path without auth should be rejected
-        assert r.status_code in (401, 302)
+        missing = requests.get(f"https://missing-app.{domain}/echo-headers", allow_redirects=False, timeout=10)
+        assert r.status_code == missing.status_code == 404
+        assert r.content == missing.content
+        assert "location" not in r.headers
 
     # -- 8. App lifecycle: stop and reload ---------------------------------
 
@@ -516,7 +522,7 @@ class TestSelfHost:
 
     def test_11b_login_good_password(self, router_url):
         """Login with correct credentials sets auth cookies."""
-        login_session = requests.Session()
+        login_session = browser_session()
         login_session.verify = True
         r = login_session.post(
             f"{router_url}/login",
@@ -540,7 +546,7 @@ class TestSelfHost:
     def test_11c_logout(self, router_url):
         """Logout clears the session."""
         # Create a fresh session, log in, then log out
-        s = requests.Session()
+        s = browser_session()
         s.verify = True
         r = s.post(
             f"{router_url}/login",
@@ -598,6 +604,8 @@ class TestSelfHost:
             async with websockets.connect(
                 uri,
                 additional_headers=extra_headers,
+                # owner auth on a handshake requires the Origin a browser would send.
+                origin=f"https://test-app.{domain}",
                 open_timeout=10,
                 close_timeout=5,
             ) as ws:

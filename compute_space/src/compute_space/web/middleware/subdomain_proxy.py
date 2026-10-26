@@ -16,20 +16,23 @@ from litestar.types.asgi_types import HTTPResponseStartEvent
 from litestar.types.asgi_types import WebSocketCloseEvent
 
 from compute_space.core.apps import get_app_from_hostname
-from compute_space.core.apps import is_public_path
+from compute_space.core.apps import is_public_request_path
 from compute_space.core.containers import ROUTER_INTERNAL_HOSTS
 from compute_space.core.domains import Domain
 from compute_space.core.logging import logger
 from compute_space.core.proxy_target import LocalPort
 from compute_space.db import get_db
-from compute_space.web.auth.auth import login_required_redirect
+from compute_space.web.auth.auth import auth_required_response
 from compute_space.web.auth.auth import verify_owner_auth
+from compute_space.web.auth.confirm_navigation import NavigationConfirmationRequired
 from compute_space.web.helpers.app_starting import app_starting_response
 from compute_space.web.helpers.proxy import proxy_http_request
 from compute_space.web.helpers.proxy import proxy_websocket_request
 from compute_space.web.helpers.zone import ZONE_SCOPE_KEY
+from compute_space.web.helpers.zone import router_base_url
 
 IS_OWNER_HEADER = ("X-OpenHost-Is-Owner", "true")
+ROUTER_URL_HEADER = "X-OpenHost-Router-URL"
 
 # Caddy (our front proxy) reaches hypercorn over loopback and, by default,
 # strips client-spoofed X-Forwarded-* before forwarding.  So we trust the
@@ -144,7 +147,7 @@ class SubdomainProxyMiddleware:
         with closing(get_db()) as db:
             zone = Domain.match(db, netloc)
             app = get_app_from_hostname(netloc, db) if zone is not None else None
-            looks_like_app = zone is not None and app is None and zone.is_app_subdomain(netloc)
+            looks_like_app = zone is not None and app is None and zone.looks_like_app_subdomain(netloc)
 
         if zone is None:
             if netloc.split(":")[0].lower() in ROUTER_INTERNAL_HOSTS:
@@ -190,6 +193,9 @@ class SubdomainProxyMiddleware:
         extra_headers = [
             ("X-Forwarded-Host", netloc),
             ("X-Forwarded-Proto", zone.scheme),
+            # Where the router is on the domain this request arrived on, for the app's browser-side service calls.
+            # Per request, unlike OPENHOST_ROUTER_PUBLIC_URL, so it's right whichever domain the visitor used.
+            (ROUTER_URL_HEADER, router_base_url(connection)),
         ]
         if forwarded_for := _resolve_forwarded_for(connection):
             extra_headers.append(("X-Forwarded-For", forwarded_for))
@@ -197,16 +203,23 @@ class SubdomainProxyMiddleware:
         try:
             verify_owner_auth(connection)
             extra_headers.append(IS_OWNER_HEADER)
-        except NotAuthorizedException:
-            if not is_public_path(app, scope["path"]):
+        except NotAuthorizedException as exc:
+            # Public paths are served anonymously, even to an owner whose cookie was refused.
+            raw_path = scope.get("raw_path")
+            if not app.public_paths or raw_path is None or not is_public_request_path(app, raw_path):
+                # Match a missing app's response so unauthorized callers cannot discover fully private apps.
+                # A Continue page is only offered on a valid owner cookie, so it reveals nothing.
+                if not app.public_paths and not isinstance(exc, NavigationConfirmationRequired):
+                    await _send_not_found(scope, receive, send)
+                    return
                 # We're outer ASGI middleware — a raised NotAuthorizedException
                 # wouldn't reach Litestar's exception handlers, so produce the
-                # equivalent response ourselves.  HTTP: same /login redirect the
+                # equivalent response ourselves.  HTTP: the same response the
                 # exception handler would emit, dispatched via Litestar's
-                # Redirect→ASGI machinery.  WS: refuse the handshake.
+                # Response-to-ASGI machinery.  WS: refuse the handshake.
                 if scope["type"] == ScopeType.HTTP:
                     request: Request[Any, Any, Any] = Request(scope, receive, send)
-                    response: Response[Any] = login_required_redirect(request)
+                    response: Response[Any] = auth_required_response(request, exc)
                     await response.to_asgi_response(None, request=request)(scope, receive, send)
                 else:
                     await send(

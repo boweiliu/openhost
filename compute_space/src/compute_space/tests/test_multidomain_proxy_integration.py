@@ -10,6 +10,7 @@ ASGI proxy hop, no podman required.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import sqlite3
@@ -22,7 +23,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from typing import cast
-from urllib.parse import parse_qs
+from urllib.parse import unquote
 from urllib.parse import urljoin
 from urllib.parse import urlsplit
 
@@ -30,21 +31,32 @@ import httpx
 import pytest
 from litestar import Litestar
 from litestar import get
+from litestar.types import ASGIApp
+from litestar.types import Message
+from litestar.types import Receive
+from litestar.types import Scope
+from litestar.types import Send
+from litestar.types import WebSocketReceiveMessage
+from websockets.asyncio.server import ServerConnection
+from websockets.asyncio.server import serve
 
 from compute_space.config import Config
 from compute_space.core.app_id import new_app_id
 from compute_space.core.domains import Domain
 from compute_space.core.domains import DomainRecord
 from compute_space.core.domains import seed_domains
+from compute_space.core.updates import initialize_shutdown_event
 from compute_space.db.connection import init_db
+from compute_space.tests._litestar_helpers import BROWSER_FETCH_METADATA
 from compute_space.tests._litestar_helpers import auth_cookie
+from compute_space.tests._litestar_helpers import cookie_header
 from compute_space.tests._litestar_helpers import ws_cookie_header
 from compute_space.tests.conftest import _make_test_config
 from compute_space.tests.conftest import open_db
 from compute_space.web.middleware.subdomain_proxy import SubdomainProxyMiddleware
 
 PRIMARY = Domain(name="host.example.com", tls=True)
-LOCAL = Domain(name="myhost.local", tls=False, mdns=True)
+LOCAL = Domain(name="myhost.local", tls=False)
 
 
 class _EchoBackend(BaseHTTPRequestHandler):
@@ -57,6 +69,7 @@ class _EchoBackend(BaseHTTPRequestHandler):
         self.send_response(418 if self.path == "/backend-error" else 200)
         self.send_header("X-Backend-Saw-Proto", self.headers.get("X-Forwarded-Proto", ""))
         self.send_header("X-Backend-Saw-Host", self.headers.get("X-Forwarded-Host", ""))
+        self.send_header("X-Backend-Saw-Router-URL", self.headers.get("X-OpenHost-Router-URL", ""))
         self.send_header("Content-Length", str(len(response_body)))
         self.end_headers()
         if self.command != "HEAD":
@@ -121,14 +134,15 @@ def proxy_config(tmp_path: Path, backend_port: int) -> Config:
     """Active config with two domains + seeded apps.
 
     `myapp` makes "/" public (so proxy tests don't need auth); `privapp` has no public
-    paths (so unauthenticated requests trigger the login redirect)."""
+    paths (so unauthenticated requests return not found)."""
     cfg = _make_test_config(tmp_path, seed_primary=False)  # this test seeds the full set itself
     init_db(cfg.db_path)
     with closing(open_db(cfg)) as db:
-        seed_domains(db, PRIMARY, [DomainRecord(LOCAL.name, LOCAL.tls, LOCAL.mdns)])
+        seed_domains(db, PRIMARY, [DomainRecord(LOCAL.name, LOCAL.tls)])
     _seed_app(cfg.db_path, "myapp", backend_port, public_paths=["/"])
     # App ports are unique in the DB; this app is only used for auth/interception tests.
     _seed_app(cfg.db_path, "privapp", backend_port + 1, public_paths=[])
+    _seed_app(cfg.db_path, "mixedapp", backend_port + 2, public_paths=["/public"])
     return cfg
 
 
@@ -138,7 +152,11 @@ def wrapped_app(proxy_config: Config) -> Any:
 
 
 def _client(wrapped_app: Any) -> httpx.AsyncClient:
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=wrapped_app), base_url="http://unused")
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=wrapped_app),
+        base_url="http://unused",
+        headers=BROWSER_FETCH_METADATA,
+    )
 
 
 @pytest.mark.asyncio
@@ -149,6 +167,7 @@ async def test_app_reachable_over_https_on_tls_domain(wrapped_app: Any) -> None:
     assert r.text == "backend-ok"
     assert r.headers["X-Backend-Saw-Proto"] == "https"
     assert r.headers["X-Backend-Saw-Host"] == "myapp.host.example.com"
+    assert r.headers["X-Backend-Saw-Router-URL"] == "https://host.example.com"
 
 
 @pytest.mark.asyncio
@@ -160,6 +179,17 @@ async def test_same_app_reachable_over_http_on_local_domain(wrapped_app: Any) ->
     # the crux: same app, arriving on `.local`, is proxied as plain http
     assert r.headers["X-Backend-Saw-Proto"] == "http"
     assert r.headers["X-Backend-Saw-Host"] == "myapp.myhost.local"
+    # The router on the domain the visitor used, not the primary.
+    assert r.headers["X-Backend-Saw-Router-URL"] == "http://myhost.local"
+
+
+@pytest.mark.asyncio
+async def test_router_url_header_is_the_routers_not_the_clients(wrapped_app: Any) -> None:
+    async with _client(wrapped_app) as c:
+        r = await c.get(
+            "http://myapp.myhost.local:8080/", headers={"X-OpenHost-Router-URL": "https://evil.example.org"}
+        )
+    assert r.headers["X-Backend-Saw-Router-URL"] == "http://myhost.local:8080"
 
 
 @pytest.mark.asyncio
@@ -202,20 +232,48 @@ async def test_unknown_external_host_still_404s(wrapped_app: Any) -> None:
 @pytest.mark.asyncio
 async def test_unauth_on_local_redirects_to_local_login_over_http(wrapped_app: Any) -> None:
     async with _client(wrapped_app) as c:
-        r = await c.get("http://privapp.myhost.local/secret")  # httpx doesn't auto-follow
+        r = await c.get("http://mixedapp.myhost.local/secret")  # httpx doesn't auto-follow
     assert r.status_code == 302
     # bounced to the .local login over http, NOT the public/canonical domain
-    assert r.headers["location"] == ("http://myhost.local/login?next=http%3A%2F%2Fprivapp.myhost.local%2Fsecret")
+    assert r.headers["location"] == ("http://myhost.local/login?next=http%3A%2F%2Fmixedapp.myhost.local%2Fsecret")
 
 
 @pytest.mark.asyncio
 async def test_unauth_on_public_redirects_to_public_login_over_https(wrapped_app: Any) -> None:
     async with _client(wrapped_app) as c:
-        r = await c.get("http://privapp.host.example.com/secret")
+        r = await c.get("http://mixedapp.host.example.com/secret")
     assert r.status_code == 302
     assert r.headers["location"] == (
-        "https://host.example.com/login?next=https%3A%2F%2Fprivapp.host.example.com%2Fsecret"
+        "https://host.example.com/login?next=https%3A%2F%2Fmixedapp.host.example.com%2Fsecret"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("domain", [PRIMARY.name, LOCAL.name])
+@pytest.mark.parametrize("method", ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+@pytest.mark.parametrize("path", ["/", "/secret/deep?view=logs"])
+@pytest.mark.parametrize("headers", [{}, {"Origin": "http://example.com:invalid"}, {"Origin": "http://["}])
+async def test_private_app_matches_unknown_app(
+    wrapped_app: Any, domain: str, method: str, path: str, headers: dict[str, str]
+) -> None:
+    async with _client(wrapped_app) as c:
+        private = await c.request(method, f"http://privapp.{domain}{path}", headers=headers)
+        missing = await c.request(method, f"http://missing.{domain}{path}", headers=headers)
+    assert private.status_code == missing.status_code == 404
+    assert private.content == missing.content
+    assert private.headers == missing.headers
+
+
+@pytest.mark.asyncio
+async def test_owner_can_access_running_private_app(wrapped_app: Any, proxy_config: Config) -> None:
+    with closing(open_db(proxy_config)) as db:
+        db.execute("UPDATE apps SET public_paths = '[]' WHERE name = 'myapp'")
+        db.commit()
+    async with _client(wrapped_app) as c:
+        c.cookies.update(auth_cookie(proxy_config))
+        r = await c.get("http://myapp.myhost.local/secret")
+    assert r.status_code == 200
+    assert r.text == "backend-ok"
 
 
 # Startup interception uses the real DB, owner session verification, and HTTP proxy.
@@ -325,10 +383,10 @@ async def test_private_startup_auth_precedes_interception_and_owner_gets_waiting
     url = f"{scheme}://privapp.{authority}/secret/deep?view=logs&next=%2Fprivate"
     async with _client(wrapped_app) as c:
         r = await c.get(url, headers={"Accept": "text/html"})
-        assert r.status_code == 302
-        login = urlsplit(r.headers["location"])
-        assert (login.scheme, login.netloc, login.path) == (scheme, authority, "/login")
-        assert parse_qs(login.query) == {"next": [url]}
+        missing = await c.get(url.replace("privapp.", "missing."), headers={"Accept": "text/html"})
+        assert r.status_code == missing.status_code == 404
+        assert r.content == missing.content
+        assert r.headers == missing.headers
         assert "coming up" not in r.text
         assert backend.requests == []
 
@@ -391,7 +449,9 @@ async def test_startup_only_retries_html_get_navigation(
         await wrapped_app(scope, receive, record)
 
     async with _client(observe_response) as c:
+        # the parametrization controls both inputs the startup heuristic reads.
         c.headers.pop("Accept", None)
+        c.headers.pop("Sec-Fetch-Mode", None)
         headers = {}
         if accept is not None:
             headers["Accept"] = accept
@@ -454,7 +514,7 @@ async def test_running_transport_failure_is_not_disguised_as_startup(wrapped_app
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["building", "starting"])
 @pytest.mark.parametrize(
-    "name,owner,code", [("myapp", False, 1013), ("privapp", False, 4401), ("privapp", True, 1013)]
+    "name,owner,code", [("myapp", False, 1013), ("privapp", False, 4404), ("privapp", True, 1013)]
 )
 async def test_startup_websocket_closes_after_auth_without_backend_handshake(
     wrapped_app: Any, proxy_config: Config, backend: _RecordingBackend, status: str, name: str, owner: bool, code: int
@@ -463,7 +523,10 @@ async def test_startup_websocket_closes_after_auth_without_backend_handshake(
     headers = [(b"host", f"{name}.myhost.local:8080".encode())]
     if owner:
         headers.extend(
-            (key.encode(), value.encode()) for key, value in ws_cookie_header(auth_cookie(proxy_config)).items()
+            (key.encode(), value.encode())
+            for key, value in ws_cookie_header(
+                auth_cookie(proxy_config), origin=f"http://{name}.myhost.local:8080"
+            ).items()
         )
     scope = {
         "type": "websocket",
@@ -493,3 +556,272 @@ async def test_startup_websocket_closes_after_auth_without_backend_handshake(
     assert [event["type"] for event in events] == expected_types
     assert events[-1]["code"] == code
     assert backend.requests == []
+    if code == 4404:
+        private_events = events.copy()
+        for host in (b"privapp.myhost.local:8080", b"missing.myhost.local:8080"):
+            events.clear()
+            scope["headers"] = [(b"host", host), (b"origin", b"http://example.com:invalid")]
+            await wrapped_app(scope, receive, send)
+            assert events == private_events
+
+
+_AMBIGUOUS_PUBLIC_PATHS = [
+    b"/dav/.",
+    b"/dav/..",
+    b"/dav/../private",
+    b"/dav/./../private",
+    b"/dav/%2e%2e/private",
+    b"/dav/.%2e/private",
+    b"/dav/%2E./private",
+    b"/dav/%2e/private",
+    b"/dav//../private",
+    b"/dav/%2f..%2fprivate",
+    b"/dav/..;parameter/private",
+    b"/dav/%2e%2e%3bparameter/private",
+    b"/dav/..\\private",
+    b"/dav/%5c..%5cprivate",
+    b"/dav/%252e%252e/private",
+    b"/dav/%252f..%252fprivate",
+    b"/dav/%255c..%255cprivate",
+    b"/dav/%00private",
+    b"/dav/%1fprivate",
+    b"/dav/%2509../private",
+    b"/dav/%7fprivate",
+    b"/dav/%ff",
+    b"/dav/%25ff",
+    b"/dav/%c0%ae%c0%ae/private",
+    b"/dav/%e0%80%ae%e0%80%ae/private",
+    b"/dav/%c0%af../private",
+    b"/dav/..#x",
+    b"/dav/x#/../../private",
+    b"/dav/..?x",
+    b"/dav/" + b"%" + b"25" * 12 + b"2e/private",
+]
+
+
+@pytest.fixture
+def partially_public_app(proxy_config: Config) -> None:
+    with closing(open_db(proxy_config)) as db:
+        db.execute("UPDATE apps SET public_paths = ? WHERE name = 'myapp'", (json.dumps(["/dav"]),))
+        db.commit()
+
+
+async def _raw_path_request(
+    wrapped_app: ASGIApp,
+    raw_path: bytes,
+    *,
+    headers: dict[str, str] | None = None,
+    method: str = "GET",
+    query: str = "",
+    omit_raw_path: bool = False,
+) -> httpx.Response:
+    # Supply the ASGI path directly: a test client would otherwise normalize literal '..'
+    # before the router sees it, hiding the difference between authorization and forwarding.
+    async def dispatch(scope: Scope, receive: Receive, send: Send) -> None:
+        scope["path"] = unquote(raw_path.decode("ascii"))
+        if omit_raw_path:
+            scope.pop("raw_path", None)
+        else:
+            scope["raw_path"] = raw_path
+        await wrapped_app(scope, receive, send)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=dispatch), headers=BROWSER_FETCH_METADATA
+    ) as client:
+        return await client.request(method, f"http://myapp.myhost.local/?{query}", headers=headers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_path", _AMBIGUOUS_PUBLIC_PATHS)
+async def test_ambiguous_public_http_path_requires_auth_before_forwarding(
+    wrapped_app: ASGIApp, partially_public_app: None, backend: _RecordingBackend, raw_path: bytes
+) -> None:
+    response = await _raw_path_request(wrapped_app, raw_path)
+    assert response.status_code == 302
+    assert urlsplit(response.headers["location"]).path == "/login"
+    assert backend.requests == []
+
+
+@pytest.mark.asyncio
+async def test_missing_raw_path_requires_auth_before_forwarding(
+    wrapped_app: ASGIApp, partially_public_app: None, backend: _RecordingBackend
+) -> None:
+    response = await _raw_path_request(wrapped_app, b"/dav/file", omit_raw_path=True)
+    assert response.status_code == 302
+    assert backend.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,expected",
+    [("GET", 302), ("HEAD", 302), ("POST", 401), ("PUT", 401), ("PATCH", 401), ("DELETE", 401), ("OPTIONS", 401)],
+)
+async def test_ambiguous_public_path_requires_auth_for_every_method(
+    wrapped_app: ASGIApp, partially_public_app: None, backend: _RecordingBackend, method: str, expected: int
+) -> None:
+    response = await _raw_path_request(wrapped_app, b"/dav/../private", method=method)
+    assert response.status_code == expected
+    assert backend.requests == []
+
+
+async def _raw_websocket_request(
+    wrapped_app: ASGIApp,
+    raw_path: bytes,
+    *,
+    headers: dict[str, str] | None = None,
+    query: str = "",
+    omit_raw_path: bool = False,
+) -> list[Message]:
+    scope = cast(
+        Scope,
+        {
+            "type": "websocket",
+            "asgi": {"version": "3.0"},
+            "scheme": "ws",
+            "path": unquote(raw_path.decode("ascii")),
+            "raw_path": raw_path,
+            "query_string": query.encode("ascii"),
+            "headers": [
+                (b"host", b"myapp.myhost.local"),
+                *([(b"origin", b"http://myapp.myhost.local")] if "origin" not in (headers or {}) else []),
+                *((k.encode(), v.encode()) for k, v in (headers or {}).items()),
+            ],
+            "client": ("127.0.0.1", 12345),
+            "server": ("myhost.local", 80),
+            "subprotocols": [],
+            "state": {},
+        },
+    )
+    if omit_raw_path:
+        scope.pop("raw_path", None)
+    events: list[Message] = []
+    inbound: asyncio.Queue[WebSocketReceiveMessage] = asyncio.Queue()
+    inbound.put_nowait({"type": "websocket.connect"})
+
+    async def receive() -> WebSocketReceiveMessage:
+        return await inbound.get()
+
+    async def send(event: Message) -> None:
+        events.append(event)
+        if event["type"] == "websocket.send":
+            inbound.put_nowait({"type": "websocket.disconnect", "code": 1000})
+
+    await asyncio.wait_for(wrapped_app(scope, receive, send), timeout=5)
+    return events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_path", _AMBIGUOUS_PUBLIC_PATHS)
+async def test_ambiguous_public_websocket_path_requires_auth_before_handshake(
+    wrapped_app: ASGIApp, partially_public_app: None, backend: _RecordingBackend, raw_path: bytes
+) -> None:
+    events = await _raw_websocket_request(wrapped_app, raw_path)
+    assert events == [{"type": "websocket.close", "code": 4401, "reason": "authentication required"}]
+    assert backend.requests == []
+
+
+@pytest.mark.asyncio
+async def test_missing_websocket_raw_path_requires_auth_before_handshake(
+    wrapped_app: ASGIApp, partially_public_app: None, backend: _RecordingBackend
+) -> None:
+    events = await _raw_websocket_request(wrapped_app, b"/dav/file", omit_raw_path=True)
+    assert events == [{"type": "websocket.close", "code": 4401, "reason": "authentication required"}]
+    assert backend.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_path",
+    [
+        b"/dav",
+        b"/dav/",
+        b"/dav/nested/file",
+        b"/dav//file",
+        b"/dav/a%3Ab%40c",
+        b"/dav/a%2fb",
+        b"/dav/%E2%98%83",
+        b"/dav/%EF%BF%BD",
+        b"/dav/a%20b",
+        b"/dav/%5Ba%5D%5Eb%60%7Bc%7Cd%7D%7E",
+        b"/dav/100%25",
+        b"/dav/a..b",
+        b"/dav/.../file",
+        b"/dav/a;b",
+        b"/dav/a%253Ab",
+    ],
+)
+async def test_unambiguous_public_path_preserves_encoded_url_and_query(
+    wrapped_app: ASGIApp, partially_public_app: None, backend: _RecordingBackend, raw_path: bytes
+) -> None:
+    query = "signature=a%3Ab%40c&next=/../private&value=%252e"
+    response = await _raw_path_request(wrapped_app, raw_path, query=query)
+    assert response.status_code == 200
+    assert backend.requests == [("GET", f"{raw_path.decode('ascii')}?{query}", b"")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_path", [b"/dav-other", b"/davish", b"/private", b"//dav/file"])
+async def test_public_paths_match_only_complete_path_segments(
+    wrapped_app: ASGIApp, partially_public_app: None, backend: _RecordingBackend, raw_path: bytes
+) -> None:
+    response = await _raw_path_request(wrapped_app, raw_path)
+    assert response.status_code == 302
+    assert backend.requests == []
+
+
+@pytest.mark.asyncio
+async def test_owner_can_still_access_paths_requiring_normalization(
+    wrapped_app: ASGIApp, proxy_config: Config, partially_public_app: None, backend: _RecordingBackend
+) -> None:
+    response = await _raw_path_request(
+        wrapped_app, b"/dav/../private", headers=cookie_header(auth_cookie(proxy_config))
+    )
+    assert response.status_code == 200
+    assert backend.requests == [("GET", "/private", b"")]
+
+
+@pytest.mark.asyncio
+async def test_wholly_public_app_does_not_restrict_path_normalization(
+    wrapped_app: ASGIApp, backend: _RecordingBackend
+) -> None:
+    response = await _raw_path_request(wrapped_app, b"/dav/../private")
+    assert response.status_code == 200
+    assert backend.requests == [("GET", "/private", b"")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "public_paths,owner,raw_path",
+    [
+        (["/dav"], False, b"/dav/a%3Ab%40c"),
+        (["/dav/", "/other"], False, b"/dav/a%3Ab%40c"),
+        (["/dav"], True, b"/dav/%2e%2e/private"),
+        (["/"], False, b"/dav/%2e%2e/private"),
+    ],
+)
+async def test_authorized_websocket_preserves_encoded_path_and_query(
+    wrapped_app: ASGIApp, proxy_config: Config, public_paths: list[str], owner: bool, raw_path: bytes
+) -> None:
+    initialize_shutdown_event(asyncio.Event())
+    received_targets: list[str] = []
+
+    async def handler(socket: ServerConnection) -> None:
+        assert socket.request is not None
+        received_targets.append(socket.request.path)
+        await socket.send("backend-ok")
+        await socket.wait_closed()
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        with closing(open_db(proxy_config)) as db:
+            db.execute(
+                "UPDATE apps SET local_port = ?, public_paths = ? WHERE name = 'myapp'",
+                (server.sockets[0].getsockname()[1], json.dumps(public_paths)),
+            )
+            db.commit()
+        query = "signature=a%3Ab%40c&next=/../private"
+        headers = ws_cookie_header(auth_cookie(proxy_config), origin="http://myapp.myhost.local") if owner else None
+        events = await _raw_websocket_request(wrapped_app, raw_path, headers=headers, query=query)
+
+    assert events[0]["type"] == "websocket.accept"
+    assert any(event.get("text") == "backend-ok" for event in events)
+    assert received_targets == [f"{raw_path.decode('ascii')}?{query}"]

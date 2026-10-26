@@ -53,6 +53,8 @@
     - import_tasks: tasks/pixi.yml
     - import_tasks: tasks/coredns.yml
       when: not (local_http_only | default(false) | bool)
+    # Without config files, they are written at first boot instead (e.g. by cloud-init).
     - import_tasks: tasks/write_openhost_config.yml
+      when: not (no_config_files | default(false) | bool)
     - import_tasks: tasks/install_openhost_units.yml
     - import_tasks: tasks/restart_openhost_service.yml

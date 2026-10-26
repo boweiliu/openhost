@@ -5,6 +5,7 @@ Run:
 """
 
 import re
+import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -40,15 +41,15 @@ class TestHarness:
         assert r.status_code == 200
         assert r.json() == {"app": "echo-provider"}
 
-    def test_router_requires_auth(self, stack: OpenhostStack) -> None:
+    def test_private_app_hidden_without_auth(self, stack: OpenhostStack) -> None:
         r = requests.get(f"{stack.url}/", allow_redirects=False, timeout=10)
-        assert r.status_code == 302
-        assert "/login" in r.headers["Location"]
+        assert r.status_code == 404
+        assert "Location" not in r.headers
 
     def test_playwright_login(self, stack: OpenhostStack, page: Page) -> None:
         """playwright_login drives the real /login form so browser tests reach owner routes."""
-        page.goto(stack.url)
-        expect(page).to_have_url(re.compile(r"/login"))  # gated before login
+        response = page.goto(stack.url)
+        assert response is not None and response.status == 404
 
         stack.playwright_login(page)
         page.goto(stack.url)
@@ -86,3 +87,20 @@ class TestHarness:
     def test_app_logs(self, stack: OpenhostStack) -> None:
         logs = stack.app_logs()
         assert "Echo provider listening" in logs or "Build complete" in logs
+
+    def test_manifest_and_zone(self, stack: OpenhostStack) -> None:
+        assert stack.manifest.name == "echo-provider"
+        assert stack.manifest.app_archive
+        assert stack.owner_username == "owner"
+        assert stack.url.startswith(f"http://{stack.manifest.name}.{stack.zone_domain.split(':')[0]}")
+
+    def test_data_dirs_and_container_name(self, stack: OpenhostStack) -> None:
+        """The host data dirs are the ones mounted into the container, which also has the archive tier."""
+        script = (
+            'test -d "$OPENHOST_APP_ARCHIVE_DIR"'
+            ' && echo data > "$OPENHOST_APP_DATA_DIR/probe"'
+            ' && echo temp > "$OPENHOST_APP_TEMP_DIR/probe"'
+        )
+        subprocess.run(["podman", "exec", stack.container_name, "sh", "-c", script], check=True, timeout=30)
+        assert (stack.data_dir / "probe").read_text() == "data\n"
+        assert (stack.temp_data_dir / "probe").read_text() == "temp\n"
