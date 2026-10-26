@@ -9,6 +9,7 @@ The [release images](../src/setup/shared_homeserver.md#part-1-download-and-run-t
 - `qemu-img` (the `qemu-utils` package), plus QEMU for the host's arch: `qemu-system-x86_64` (`qemu-system-x86`) for amd64, or `qemu-system-aarch64` and its UEFI firmware (`qemu-system-arm` and `qemu-efi-aarch64`) for arm64.
 - A seed-ISO builder: `cloud-localds` (from `cloud-image-utils`), or `xorriso`, `genisoimage`, or `mkisofs`.
 - `curl`, `tar`, and `timeout`.
+- `python3` for amd64 OVA packaging (not needed with `--no-ova` or on arm64).
 - KVM (`/dev/kvm`), or HVF on macOS.
 
 On an Apple silicon Mac, `brew install qemu cdrtools coreutils` covers all of this, and the build runs under HVF in about five minutes.
