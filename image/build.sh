@@ -76,8 +76,8 @@
 #
 # Requirements: qemu-system-x86_64 (amd64) or qemu-system-aarch64 plus UEFI
 # firmware from qemu-efi-aarch64 (arm64), qemu-img, cloud-localds
-# (cloud-image-utils) or xorriso/genisoimage/mkisofs, curl, tar, timeout, and
-# KVM (/dev/kvm) or HVF on macOS.
+# (cloud-image-utils) or xorriso/genisoimage/mkisofs, curl, tar, timeout,
+# python3 (for OVA packaging), and KVM (/dev/kvm) or HVF on macOS.
 
 set -euo pipefail
 
@@ -201,6 +201,9 @@ need "$QEMU"         "Install qemu-system-x86 (amd64) or qemu-system-arm (arm64)
 need curl           "Install curl."
 need tar            "Install tar."
 need timeout        "Install coreutils."
+if [ "$MAKE_OVA" = "true" ]; then
+    need python3    "Install Python 3 for OVA packaging."
+fi
 
 if [ -w /dev/kvm ]; then
     KVM_ARGS=(-enable-kvm -cpu host)
@@ -415,7 +418,8 @@ if [ "$MAKE_OVA" = "true" ]; then
     qemu-img convert -O vmdk -o subformat=streamOptimized,adapter_type=lsilogic \
         "$DISK" "$VMDK"
 
-    CAPACITY_BYTES="$(qemu-img info --output=json "$DISK" | sed -n 's/.*"virtual-size": *\([0-9]*\).*/\1/p' | head -n1)"
+    # Nested child images can report the physical file size; use the root disk's logical size.
+    CAPACITY_BYTES="$(qemu-img info --output=json "$DISK" | python3 -c 'import json, sys; print(json.load(sys.stdin)["virtual-size"])')"
     VMDK_BYTES="$(file_size "$VMDK")"
     OVF="$OVA_STAGE/$ARTIFACT_BASE.ovf"
     VMDK_NAME="$(basename "$VMDK")"
