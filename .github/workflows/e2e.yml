@@ -17,7 +17,8 @@ jobs:
     # Fork pull requests cannot access the cloud, DNS, or SSH secrets this job requires.
     # Maintainers can test the same commit from a repository branch with workflow_dispatch.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    # Pinned: Playwright 1.60 can't install browsers on ubuntu-26.04 (now ubuntu-latest).
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     concurrency:
