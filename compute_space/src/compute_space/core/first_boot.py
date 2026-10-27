@@ -70,7 +70,6 @@ class FirstBoot:
     imbue_identity_client_secret: str | None = None
     # Base URL of the Imbue API for the "Connect to Imbue" flow (optional).
     imbue_connect_base_url: str | None = None
-    # Preconfigured S3 archive backend (optional).
     archive_backend: FirstBootArchiveBackend | None = None
 
 
