@@ -325,6 +325,19 @@ async def _serve(app: Any, hypercorn_config: hypercorn.config.Config) -> bool:
         await shutdown_event.wait()
         logger.info("shutdown trigger unblocked")
         cleanup_terminal_sessions()
+        # Hotfix 2026-07-01: hypercorn's graceful drain can hang indefinitely
+        # when an idle upstream keepalive connection (held open by Caddy) never
+        # closes — serve() never returns, os._exit() below never runs, and
+        # systemd never restarts us.  Force exit after a short grace so we
+        # don't depend on serve() returning.  Exit 42 (restart) only when this
+        # was a restart request, not a signal (systemctl stop/restart).
+        _exit_code = 0 if signal_received else RESTART_EXIT_CODE
+
+        def _force_exit() -> None:
+            logger.info(f"Forcing os._exit({_exit_code}) after shutdown grace")
+            os._exit(_exit_code)
+
+        loop.call_later(2.0, _force_exit)
 
     await hypercorn.asyncio.serve(app, hypercorn_config, shutdown_trigger=shutdown_trigger)
 
