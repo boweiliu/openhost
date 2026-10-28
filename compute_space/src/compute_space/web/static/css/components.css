@@ -295,13 +295,15 @@ h2.section-title {
 }
 
 .btn--primary,
-.btn-primary {
+.btn-primary,
+.btn[aria-pressed="true"] {
   background: var(--color-accent);
   border-color: var(--color-accent);
 }
 
 .btn--primary:hover,
-.btn-primary:hover {
+.btn-primary:hover,
+.btn[aria-pressed="true"]:hover {
   background: var(--color-accent-hover);
 }
 

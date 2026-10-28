@@ -1,0 +1,361 @@
+/* Classic theme: the flat, system-font look the dashboard had before the Sky
+   redesign. Everything is scoped to :root[data-theme="classic"], which
+   theme.js sets, so the default Sky theme is untouched. Most of the change is
+   the token overrides below; the rules after them cover what the tokens can't
+   reach (layout, banner, nav, bordered form rows). */
+
+:root[data-theme="classic"] {
+  --font-mono: -apple-system, system-ui, "Segoe UI", Helvetica, Arial, sans-serif;
+
+  --text-xs: 14px;
+  --text-sm: 16px;
+  --text-md: 16px;
+  --text-lg: 24px;
+
+  --leading-tight: 20px;
+  --leading-snug: 24px;
+  --leading-loose: 40px;
+
+  --tracking-label: 0;
+  --tracking-title: 0;
+  --tracking-heading: 0;
+  --tracking-body: 0;
+  --tracking-name: 0;
+
+  --weight-medium: 400;
+  --weight-semibold: 600;
+
+  --color-sky: #ffffff;
+  --color-meadow: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-sunken: #f5f5f5;
+  --color-border: #dddddd;
+  --color-border-strong: #cccccc;
+
+  --color-text: #222222;
+  --color-text-muted: #888888;
+  --color-text-subtle: #666666;
+
+  --color-accent: #e8f0fe;
+  --color-accent-hover: #d6e4fd;
+  --color-danger-bg: #ffeeee;
+  --color-danger-hover: #ffdddd;
+  --color-danger-border: #cc0000;
+  --color-danger-text: #cc0000;
+  --color-ok-text: #008800;
+  --color-warn-text: #cc8800;
+
+  --shadow-card: none;
+  --layout-width: 960px;
+}
+
+:root[data-theme="classic"] .deco-clouds,
+:root[data-theme="classic"] .deco-grass {
+  display: none;
+}
+
+/* Banner: a plain left-aligned page title instead of the dashed pixel rule. */
+:root[data-theme="classic"] .banner {
+  display: block;
+  margin: 0 0 var(--space-4);
+  font-size: 32px;
+  font-weight: var(--weight-bold);
+  line-height: 40px;
+  text-transform: none;
+}
+
+:root[data-theme="classic"] .banner::before,
+:root[data-theme="classic"] .banner::after {
+  display: none;
+}
+
+:root[data-theme="classic"] .banner__text {
+  text-align: left;
+}
+
+/* Section headings: plain h2 with a hairline under it. */
+:root[data-theme="classic"] .section {
+  margin-bottom: var(--space-7);
+}
+
+:root[data-theme="classic"] .section-head {
+  margin-bottom: var(--space-4);
+  padding-bottom: 6px;
+  border-bottom: var(--border-w) solid #eeeeee;
+}
+
+:root[data-theme="classic"] .section-label {
+  font-size: 24px;
+  font-weight: var(--weight-bold);
+  line-height: 28px;
+  text-transform: none;
+  opacity: 1;
+}
+
+/* Panels lose their card; label/value fields become bordered rows with a
+   shaded label column, like the old form tables. */
+:root[data-theme="classic"] .panel {
+  padding: 0;
+  background: none;
+  border: 0;
+}
+
+:root[data-theme="classic"] .panel > .field {
+  display: grid;
+  grid-template-columns: 12em 1fr;
+  margin: 0 0 -1px;
+  border: var(--border-w) solid var(--color-border);
+}
+
+:root[data-theme="classic"] .panel > .field > :first-child {
+  grid-column: 1;
+  grid-row: 1 / span 12;
+  margin: 0;
+  padding: 8px 12px;
+  background: var(--color-surface-sunken);
+  border-right: var(--border-w) solid var(--color-border);
+  font-size: var(--text-sm);
+  text-transform: none;
+  opacity: 1;
+}
+
+:root[data-theme="classic"] .panel > .field > :not(:first-child) {
+  grid-column: 2;
+  margin: 0;
+  padding: 4px 12px;
+}
+
+:root[data-theme="classic"] .panel > .field > :nth-child(2) {
+  padding-top: 10px;
+}
+
+:root[data-theme="classic"] .panel > .field > :last-child {
+  padding-bottom: 10px;
+}
+
+:root[data-theme="classic"] .panel > .rule {
+  display: none;
+}
+
+/* Controls */
+:root[data-theme="classic"] .panel > .field > .btn {
+  justify-self: start;
+}
+
+:root[data-theme="classic"] .field > span,
+:root[data-theme="classic"] .field > label,
+:root[data-theme="classic"] .field__head > label {
+  text-transform: none;
+  opacity: 1;
+}
+
+:root[data-theme="classic"] .btn,
+:root[data-theme="classic"] .btn-primary,
+:root[data-theme="classic"] .btn-danger {
+  min-height: 0;
+  padding: 6px 14px;
+  background: #f9f9f9;
+  border-color: #cccccc;
+}
+
+:root[data-theme="classic"] .btn:hover {
+  background: #f0f0f0;
+}
+
+:root[data-theme="classic"] .btn--primary,
+:root[data-theme="classic"] .btn-primary,
+:root[data-theme="classic"] .btn[aria-pressed="true"] {
+  background: var(--color-accent);
+  border-color: #3366cc;
+  color: #3366cc;
+}
+
+:root[data-theme="classic"] .btn--primary:hover,
+:root[data-theme="classic"] .btn-primary:hover,
+:root[data-theme="classic"] .btn[aria-pressed="true"]:hover {
+  background: var(--color-accent-hover);
+}
+
+:root[data-theme="classic"] .btn--danger,
+:root[data-theme="classic"] .btn-danger {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger-border);
+  color: var(--color-danger-text);
+}
+
+:root[data-theme="classic"] input[type="text"],
+:root[data-theme="classic"] input[type="password"],
+:root[data-theme="classic"] input[type="number"],
+:root[data-theme="classic"] select {
+  padding: 6px;
+  border-color: #cccccc;
+}
+
+:root[data-theme="classic"] select {
+  padding-right: var(--space-7);
+}
+
+/* Tables: full grid, shaded plain-case header cells. */
+:root[data-theme="classic"] table {
+  font-size: var(--text-sm);
+}
+
+:root[data-theme="classic"] th,
+:root[data-theme="classic"] td {
+  padding: 8px 13px;
+  border: var(--border-w) solid var(--color-border);
+}
+
+:root[data-theme="classic"] th {
+  background: var(--color-surface-sunken);
+  font-size: var(--text-sm);
+  text-transform: none;
+  white-space: normal;
+  opacity: 1;
+}
+
+/* Dashboard: the app list reads like the old Name / Status / Actions table, and the
+   Details link is always visible as a normal-size button instead of appearing on hover. */
+:root[data-theme="classic"] .app-list {
+  box-shadow: none;
+}
+
+:root[data-theme="classic"] .app-row {
+  min-height: 52px;
+  padding: 8px 13px;
+}
+
+:root[data-theme="classic"] .app-row__name {
+  color: #3366cc;
+  font-weight: var(--weight-bold);
+}
+
+:root[data-theme="classic"] .status-dot {
+  margin-left: auto;
+}
+
+:root[data-theme="classic"] .app-row__status {
+  position: static;
+  width: 6.5em;
+  height: auto;
+  margin: 0;
+  clip-path: none;
+  overflow: visible;
+  white-space: normal;
+  font-size: var(--text-sm);
+}
+
+:root[data-theme="classic"] [data-status="running"] .app-row__status {
+  color: var(--color-ok-text);
+  font-weight: var(--weight-bold);
+}
+
+:root[data-theme="classic"] [data-status="error"] .app-row__status {
+  color: var(--color-danger-text);
+  font-weight: var(--weight-bold);
+}
+
+:root[data-theme="classic"] [data-status="stopped"] .app-row__status {
+  color: var(--color-text-muted);
+}
+
+:root[data-theme="classic"] [data-status="building"] .app-row__status,
+:root[data-theme="classic"] [data-status="starting"] .app-row__status,
+:root[data-theme="classic"] [data-status="removing"] .app-row__status {
+  color: var(--color-warn-text);
+}
+
+:root[data-theme="classic"] .status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+:root[data-theme="classic"] .app-row__details {
+  margin-left: var(--space-3);
+  padding: 6px 14px;
+  background: #f9f9f9;
+  border: var(--border-w) solid #cccccc;
+  color: var(--color-text);
+  font-size: var(--text-xs);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+:root[data-theme="classic"] .app-row__details:hover {
+  background: #f0f0f0;
+  text-decoration: none;
+}
+
+:root[data-theme="classic"] .btn--accent {
+  background: var(--color-accent);
+  border-color: #3366cc;
+  color: #3366cc;
+  text-transform: none;
+}
+
+:root[data-theme="classic"] .btn--accent:hover {
+  background: var(--color-accent-hover);
+}
+
+/* Login, setup and the other single-purpose pages keep a bordered card in a narrow column. */
+:root[data-theme="classic"] .layout--narrow .panel {
+  padding: var(--space-6);
+  background: var(--color-surface);
+  border: var(--border-w) solid var(--color-border);
+}
+
+/* The manual has its own page template; give its header the same plain title. */
+:root[data-theme="classic"] .space-header h1.space-title {
+  margin: 0 0 var(--space-4);
+  font-size: 32px;
+  font-weight: var(--weight-bold);
+  line-height: 40px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* Navigation: the back link and the three icon links become plain labelled buttons. The label is the
+   link's own title attribute, so there is no text to keep in sync here. */
+:root[data-theme="classic"] .nav-back {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-transform: none;
+  opacity: 1;
+  color: #3366cc;
+}
+
+:root[data-theme="classic"] .nav-back .icon {
+  display: none;
+}
+
+:root[data-theme="classic"] .icon-nav {
+  gap: var(--space-2);
+}
+
+:root[data-theme="classic"] .icon-btn {
+  width: auto;
+  height: auto;
+  gap: 6px;
+  padding: 6px 14px;
+  background: #f9f9f9;
+  border: var(--border-w) solid #cccccc;
+  color: var(--color-text);
+  font-size: var(--text-xs);
+  text-decoration: none;
+  opacity: 1;
+}
+
+:root[data-theme="classic"] .icon-btn::after {
+  content: attr(title);
+}
+
+:root[data-theme="classic"] .icon-btn:hover {
+  background: #f0f0f0;
+}
+
+:root[data-theme="classic"] .icon-btn .icon {
+  width: 14px;
+  height: 14px;
+}

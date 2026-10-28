@@ -426,8 +426,10 @@ _TEMPLATE = """{% from "_components/icon_nav.html" import icon_nav %}{% from "_c
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@500;600;700&display=swap">
+  <script src="{{ static_url('js/theme.js') }}"></script>
   <link rel="stylesheet" href="{{ static_url('css/tokens.css') }}">
   <link rel="stylesheet" href="{{ static_url('css/components.css') }}">
+  <link rel="stylesheet" href="{{ static_url('css/theme-classic.css') }}">
   <style>
     /* The docs page deliberately reuses layout.html's exact palette and
        typography (hardcoded light colours, #222 text on #fff, #ddd

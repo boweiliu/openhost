@@ -50,6 +50,21 @@
   </div>
 </section>
 
+<section class="section">
+  {% call section_head("Appearance") %}{% endcall %}
+  <div class="panel">
+    <div class="field">
+      <span id="theme-label">Theme</span>
+      <div class="actions" role="group" aria-labelledby="theme-label">
+        {{ button("Sky", id="theme-sky", onclick="setTheme('sky')") }}
+        {{ button("Classic", id="theme-classic", onclick="setTheme('classic')") }}
+      </div>
+      <p class="hint">Sky has the clouds and the pixel font. Classic is flat, with system fonts and tab navigation.
+        Applies to this browser only.</p>
+    </div>
+  </div>
+</section>
+
 <section class="section" id="connect-imbue-section" hidden>
   {% call section_head("Imbue account") %}{% endcall %}
   <div class="panel">

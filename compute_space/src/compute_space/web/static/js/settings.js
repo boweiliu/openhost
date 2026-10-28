@@ -962,6 +962,19 @@ async function connectImbue() {
   msg.hidden = false;
 })();
 
+function renderThemeChoice() {
+  const current = window.OpenHostTheme.getChoice();
+  for (const choice of window.OpenHostTheme.choices) {
+    document.getElementById('theme-' + choice).setAttribute('aria-pressed', String(choice === current));
+  }
+}
+
+function setTheme(choice) {
+  window.OpenHostTheme.setChoice(choice);
+  renderThemeChoice();
+}
+
+renderThemeChoice();
 loadOwnerUsername();
 loadRemote();
 loadAutoUpdate();
