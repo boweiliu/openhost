@@ -4,6 +4,7 @@ var config = JSON.parse(document.getElementById('page-config').textContent);
   var term = new Terminal({
     cursorBlink: true,
     fontSize: 14,
+    fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim(),
     theme: {
       background: getComputedStyle(document.documentElement).getPropertyValue('--fg-primary').trim(),
       brightBlack: '#8b8b8b',
