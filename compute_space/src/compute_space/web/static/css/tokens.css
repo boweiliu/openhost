@@ -30,8 +30,8 @@
 
   /* fg/status */
   --fg-status-negative: #cc0000;
-  --fg-status-positive: #008800;
-  --fg-status-warning: #cc8800;
+  --fg-status-positive: #006b00;
+  --fg-status-warning: #8a5a00;
   --fg-status-info: #375a66;
 
   /* interactive. Hover and active are overlays: apply them as

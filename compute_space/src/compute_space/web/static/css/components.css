@@ -1879,7 +1879,7 @@ td.col-actions .icon-btn {
 }
 
 :root [data-status="running"] .app-row__status {
-  color: #008800;
+  color: #006b00;
   font-weight: 700;
 }
 
@@ -1889,13 +1889,13 @@ td.col-actions .icon-btn {
 }
 
 :root [data-status="stopped"] .app-row__status {
-  color: #888888;
+  color: #6b6b6b;
 }
 
 :root [data-status="building"] .app-row__status,
 :root [data-status="starting"] .app-row__status,
 :root [data-status="removing"] .app-row__status {
-  color: #cc8800;
+  color: #8a5a00;
 }
 
 :root .app-row__details {
