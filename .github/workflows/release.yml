@@ -8,8 +8,9 @@ name: release
 #
 # To cut a release (the version lives in the root pyproject.toml; that distribution
 # bundles the sub-packages, so that one field is the version of record; the package
-# itself is still named `openhost`, only the release artifacts are rebranded):
-#   uv version 0.1.4                   # or edit pyproject.toml's [project] version
+# itself is still named `openhost`, only the release artifacts are rebranded), run
+# `just release 0.1.4`, which walks through the steps below interactively. By hand:
+#   uv version 0.1.4                  # or edit pyproject.toml's [project] version
 #   git commit -am "Release v0.1.4" && git push
 #   git tag v0.1.4 && git push origin v0.1.4
 #
@@ -49,9 +50,9 @@ jobs:
   # This is what turns "we forgot to bump pyproject" into a loud, immediate failure.
   verify-version:
     if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Verify pyproject version matches the tag
         env:
           TAG: ${{ github.ref_name }}
@@ -73,11 +74,11 @@ jobs:
   # check runs advisory-only on main (see ci.yml).
   pin-drift:
     if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: prefix-dev/setup-pixi@v0.8.10
+      - uses: actions/checkout@v7
+      - uses: prefix-dev/setup-pixi@v0.11.2
         with:
           pixi-version: v0.70.2
           environments: dev
@@ -92,7 +93,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [amd64, arm64]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # The build boots a VM and provisions it end to end; give it plenty of room.
     # build.sh has its own 30-min boot timeout inside this budget.
     timeout-minutes: 90
@@ -101,7 +102,7 @@ jobs:
       BRANCH: ${{ github.head_ref || github.ref_name }}
     steps:
       - name: Check out the release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -114,7 +115,7 @@ jobs:
       - name: Enable KVM access
         if: matrix.arch == 'amd64'
         run: |
-          # GitHub's 2-vCPU+ Linux runners (incl. ubuntu-latest) ship /dev/kvm,
+          # GitHub's 2-vCPU+ Linux runners ship /dev/kvm,
           # but it's root:kvm 0660, not writable by the runner user, which
           # build.sh requires. Grant access via udev. Same rule
           # android-emulator-runner uses. See
@@ -146,14 +147,14 @@ jobs:
 
       - name: Upload console log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: console-log-${{ matrix.arch }}
           path: image/out/build-console.log
           if-no-files-found: ignore
 
       - name: Upload images
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: images-${{ matrix.arch }}
           path: |
@@ -167,10 +168,10 @@ jobs:
   publish:
     needs: build
     if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Download images
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: images-*
           path: image/out
