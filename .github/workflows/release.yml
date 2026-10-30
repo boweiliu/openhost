@@ -8,8 +8,9 @@ name: release
 #
 # To cut a release (the version lives in the root pyproject.toml; that distribution
 # bundles the sub-packages, so that one field is the version of record; the package
-# itself is still named `openhost`, only the release artifacts are rebranded):
-#   uv version 0.1.4                   # or edit pyproject.toml's [project] version
+# itself is still named `openhost`, only the release artifacts are rebranded), run
+# `just release 0.1.4`, which walks through the steps below interactively. By hand:
+#   uv version 0.1.4                  # or edit pyproject.toml's [project] version
 #   git commit -am "Release v0.1.4" && git push
 #   git tag v0.1.4 && git push origin v0.1.4
 #
