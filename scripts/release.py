@@ -50,9 +50,12 @@ def check_tag_is_new(tag: str) -> None:
 
 def open_bump_pr(worktree: Path, tag: str, pep440: str) -> str:
     branch = f"release/{tag}"
+    # origin may be a pre-rename URL that GitHub redirects; gh pr create needs the canonical repo name.
+    repo = run("gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
     existing = run(
-        "gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url // empty"
-    )
+        "gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+        "--json", "url", "--jq", ".[0].url // empty",
+    )  # fmt: skip
     if existing:
         print(f"\nfound open PR {existing}")
         return existing
@@ -62,7 +65,7 @@ def open_bump_pr(worktree: Path, tag: str, pep440: str) -> str:
     run("git", "commit", "-am", f"Release {tag}", cwd=worktree)
     run_visible("git", "push", "--force", "-u", "origin", branch, cwd=worktree)
     url = run(
-        "gh", "pr", "create", "--base", "main", "--head", branch,
+        "gh", "pr", "create", "--repo", repo, "--base", "main", "--head", branch,
         "--title", f"Release {tag}", "--body", f"Bump the version to {pep440} for the {tag} release.",
         cwd=worktree,
     )  # fmt: skip
