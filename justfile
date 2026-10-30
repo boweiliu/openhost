@@ -11,3 +11,7 @@ local-stack *args:
 # same, but wipe the persisted data dir first so setup starts over
 local-stack-fresh *args:
     pixi run -e dev python scripts/run_local_stack.py --fresh {{args}}
+
+# cut a release (eg `just release 0.3.1`): bump PR, tag, watch the build, publish. interactive.
+release version:
+    pixi run -e dev python scripts/release.py {{version}}
